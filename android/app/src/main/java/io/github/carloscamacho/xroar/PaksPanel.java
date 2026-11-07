@@ -22,10 +22,10 @@ import java.util.List;
  * to insert it (the CoCo resets and starts it, as turning it on with the Pak
  * in would), long-press to delete it. */
 final class PaksPanel extends LinearLayout {
-    private static final int BG = 0xF2121316;
-    private static final int TEXT = 0xFFE3E2E6;
-    private static final int DIM = 0xFFC4C6D0;
-    private static final int WARN = 0xFFF2B35A;
+    private static final int BG = Theme.SURFACE;
+    private static final int TEXT = Theme.TEXT_STRONG;
+    private static final int DIM = Theme.TEXT_MUTED;
+    private static final int WARN = Theme.ERROR;
 
     private final MainActivity host;
     private final PakLibrary library;
@@ -112,7 +112,7 @@ final class PaksPanel extends LinearLayout {
         b.setText(label);
         b.setAllCaps(false);
         b.setTextSize(14);
-        b.setTextColor(0xFFAAC7FF);
+        b.setTextColor(Theme.PRIMARY);
         b.setMinWidth(0);
         b.setMinimumWidth(0);
         b.setMinHeight(dp(40));

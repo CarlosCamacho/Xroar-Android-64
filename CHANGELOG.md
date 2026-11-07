@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+### v9 (versionCode 9)
+
+- The owner's MaterialKolor theme (dark scheme) for the whole UI: `Theme.java`
+  holds the roles, `res/values/styles.xml` gives the same colors to the system
+  widgets (the app theme is now `Theme.Material`, not the old pre-Holo theme).
+  Buttons, cards and dialogs have slightly rounded (6-8 dp) corners, not pills.
+- Keyboard and joysticks redrawn for a photographic look: soft shadows, sloped
+  keycap sides, dished faces, plastic grain, brushed aluminium, glossy plastic.
+  The drawing moved to `KeyboardArt` / `JoystickArt` (android.graphics only);
+  the views cache the still parts in bitmaps.
+- The Radio Shack joystick's button is at its top edge.
+- `tools/artpreview/run.sh` renders that same drawing code to PNG on a desktop,
+  through Java2D stand-ins for android.graphics, so the art can be checked
+  without a phone.
+
+### Learned
+
+- [SIM] tools/artpreview is a check of the drawing, not of the phone: Java2D's
+  gradients, text and blur are close to Android's but not identical.
+
 ### v8 (versionCode 8)
 
 - Settings restyled after Material Design 3 (dark): tonal buttons, outlined

@@ -271,7 +271,7 @@ public class MainActivity extends SDLActivity {
         b.setText(label);
         b.setAllCaps(false);
         b.setTextSize(13);
-        b.setTextColor(Color.WHITE);
+        b.setTextColor(Theme.TEXT_STRONG);
         b.setMinWidth(0);
         b.setMinimumWidth(0);
         b.setMinHeight(0);
@@ -301,7 +301,7 @@ public class MainActivity extends SDLActivity {
 
         toolbar = new LinearLayout(this);
         toolbar.setOrientation(LinearLayout.HORIZONTAL);
-        toolbar.setBackgroundColor(0xE6000000);
+        toolbar.setBackgroundColor(Theme.SURFACE);
         keysButton = toolButton("Keys", v -> setKeyboardVisible(!settings.getBool("ui_kbd", true)));
         padButton = toolButton("Pad", v -> setPadVisible(!settings.getBool("ui_pad", false)));
         Button typeButton = toolButton("Type…", v -> showTypeDialog());
@@ -382,14 +382,14 @@ public class MainActivity extends SDLActivity {
         pad.setType(settings.get("ui_joy_type", "std"));
         boolean joyTab = "joy".equals(settings.get("ui_tab", "keys"));
         if (tabKeys != null) {
-            tabKeys.setTextColor(joyTab ? Color.WHITE : 0xFF6CB0FF);
-            tabJoy.setTextColor(joyTab ? 0xFF6CB0FF : Color.WHITE);
+            tabKeys.setTextColor(joyTab ? Theme.TEXT_MUTED : Theme.PRIMARY);
+            tabJoy.setTextColor(joyTab ? Theme.PRIMARY : Theme.TEXT_MUTED);
         }
         pad.setHaptic(haptic);
         boolean kv = settings.getBool("ui_kbd", true);
         boolean pv = settings.getBool("ui_pad", false);
-        keysButton.setTextColor(kv ? 0xFF6CB0FF : Color.WHITE);
-        padButton.setTextColor(pv ? 0xFF6CB0FF : Color.WHITE);
+        keysButton.setTextColor(kv ? Theme.PRIMARY : Theme.TEXT_STRONG);
+        padButton.setTextColor(pv ? Theme.PRIMARY : Theme.TEXT_STRONG);
     }
 
     private static void place(View v, int x, int y, int w, int h) {
@@ -847,7 +847,7 @@ public class MainActivity extends SDLActivity {
                 msg = BasicText.summary(probs, 4);
             }
             info.setText(msg);
-            info.setTextColor(errors ? 0xFFD93025 : (probs.isEmpty() ? 0xFF188038 : 0xFFB06000));
+            info.setTextColor(errors ? Theme.ERROR : (probs.isEmpty() ? Theme.TERTIARY_CONTAINER : Theme.SECONDARY));
             android.widget.Button ok = d.getButton(AlertDialog.BUTTON_POSITIVE);
             if (ok != null) {
                 ok.setEnabled(!text.isEmpty() && (!errors || skip.isChecked()));

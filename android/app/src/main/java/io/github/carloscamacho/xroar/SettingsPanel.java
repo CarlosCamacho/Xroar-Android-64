@@ -29,15 +29,14 @@ import java.util.Map;
  * Input and Files.  Everything applies at once (the emulator keeps running
  * behind it) and is saved in settings.conf. */
 final class SettingsPanel extends LinearLayout {
-    // Material Design 3, dark scheme
-    private static final int BG = 0xF2121316;        // surface
-    private static final int CARD = 0xFF1E2024;      // surface container
-    private static final int TEXT = 0xFFE3E2E6;      // on surface
-    private static final int DIM = 0xFFC4C6D0;       // on surface variant
-    private static final int OUTLINE = 0xFF8E9099;
-    private static final int ACCENT = 0xFFAAC7FF;    // primary
-    private static final int TONAL = 0xFF284777;     // primary container
-    private static final int ON_TONAL = 0xFFD6E3FF;  // on primary container
+    private static final int BG = Theme.SURFACE;
+    private static final int CARD = Theme.SURFACE_RAISED;
+    private static final int TEXT = Theme.TEXT_STRONG;
+    private static final int DIM = Theme.TEXT_MUTED;
+    private static final int OUTLINE = Theme.BORDER_STRONG;
+    private static final int ACCENT = Theme.PRIMARY;
+    private static final int TONAL = Theme.PRIMARY_CONTAINER;
+    private static final int ON_TONAL = Theme.ON_PRIMARY_CONTAINER;
 
     private static final String[] TAB_NAMES = { "Machine", "Video", "Audio", "Input", "Files" };
 
@@ -147,7 +146,7 @@ final class SettingsPanel extends LinearLayout {
         b.setMinHeight(dp(40));
         b.setMinimumHeight(dp(40));
         b.setStateListAnimator(null);
-        b.setBackground(new RippleDrawable(ColorStateList.valueOf(0x33FFFFFF), round(TONAL, 20, 0), null));
+        b.setBackground(new RippleDrawable(ColorStateList.valueOf(0x33FFFFFF), round(TONAL, Theme.BUTTON_RADIUS_DP, 0), null));
         b.setOnClickListener(v -> r.run());
         return b;
     }
@@ -161,7 +160,7 @@ final class SettingsPanel extends LinearLayout {
         sectionCount++;
         LinearLayout card = new LinearLayout(getContext());
         card.setOrientation(VERTICAL);
-        card.setBackground(round(CARD, 16, 0));
+        card.setBackground(round(CARD, Theme.CARD_RADIUS_DP, 0));
         LinearLayout.LayoutParams cp = new LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT);
         cp.setMargins(0, dp(6), 0, dp(2));
@@ -171,7 +170,7 @@ final class SettingsPanel extends LinearLayout {
         head.setOrientation(HORIZONTAL);
         head.setGravity(Gravity.CENTER_VERTICAL);
         head.setPadding(dp(16), dp(14), dp(16), dp(14));
-        head.setBackground(new RippleDrawable(ColorStateList.valueOf(0x22FFFFFF), null, round(0xFFFFFFFF, 16, 0)));
+        head.setBackground(new RippleDrawable(ColorStateList.valueOf(0x22FFFFFF), null, round(0xFFFFFFFF, Theme.CARD_RADIUS_DP, 0)));
         TextView t = new TextView(getContext());
         String nice = title.substring(0, 1) + title.substring(1).toLowerCase(java.util.Locale.US);
         t.setText(nice);
@@ -247,7 +246,7 @@ final class SettingsPanel extends LinearLayout {
 
     private View spinner(String[] labels, final String[] values, String current, final OnPick cb) {
         Spinner sp = new Spinner(getContext());
-        sp.setBackground(round(0x00000000, 8, OUTLINE));
+        sp.setBackground(round(0x00000000, Theme.BUTTON_RADIUS_DP, OUTLINE));
         sp.setPadding(dp(8), dp(6), dp(8), dp(6));
         ArrayAdapter<String> ad = new ArrayAdapter<>(getContext(), android.R.layout.simple_spinner_item, labels);
         ad.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
@@ -400,7 +399,7 @@ final class SettingsPanel extends LinearLayout {
             boolean missing = label == null;
             add(line(slot.title, TEXT));
             add(line(missing ? (slot.required ? "MISSING" : "not present (optional)") : label,
-                    missing ? (slot.required ? 0xFFF28B82 : DIM) : 0xFF81C995));
+                    missing ? (slot.required ? Theme.ERROR : DIM) : Theme.TERTIARY_CONTAINER));
             add(buttonRow(
                     actionButton(missing ? "Add…" : "Replace…", () -> host.pickRom(slot)),
                     actionButton("Remove", () -> host.removeRom(slot))));

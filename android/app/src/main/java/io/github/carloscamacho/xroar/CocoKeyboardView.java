@@ -1,8 +1,9 @@
 package io.github.carloscamacho.xroar;
 
 import android.content.Context;
+import android.graphics.Bitmap;
 import android.graphics.Canvas;
-import android.graphics.Paint;
+import android.graphics.Rect;
 import android.graphics.RectF;
 import android.os.SystemClock;
 import android.util.SparseIntArray;
@@ -18,95 +19,63 @@ import java.util.List;
  * values of XRoar's dkbd.h), so BREAK, CLEAR, the arrows and SHIFT combinations
  * behave exactly as on the real machine.
  *
- * Layout follows the real keyboard (14 units wide, 5 rows), each row stepped
- * in a little further than the one above:
- *   1 2 3 4 5 6 7 8 9 0 : -  BREAK
- *   UP Q W E R T Y U I O P @ LEFT RIGHT
- *   DOWN A S D F G H J K L ; ENTER CLEAR
- *   SHIFT Z X C V B N M , . / SHIFT
- *   SPACE
- * Keys with a second legend (! over 1, and so on) print the SHIFTed one above.
- * Four keycap styles copy the keyboards the CoCo family shipped with.
+ * The look (layout, keycaps, the four styles) is KeyboardArt.  This view draws
+ * the idle keyboard once into a bitmap (shadows use a blur, which wants a
+ * software canvas) and on each frame only redraws the keys that are held.
  *
  * SHIFT is sticky when enabled: one tap shifts the next key, a quick second
  * tap locks it, and a third tap (or any tap while locked) lets go.  Several
- * fingers can be down at once (hold a key while tapping SHIFT, or hold arrows
- * in a game). */
+ * fingers can be down at once. */
 final class CocoKeyboardView extends View {
     interface Listener {
         /* dscan is a CoCo key number; down is true on press, false on release. */
         void onKey(int dscan, boolean down);
     }
 
-    static final int D_SHIFT = 0x37;
+    static final int D_SHIFT = KeyboardArt.D_SHIFT;
+    static final float COLS = KeyboardArt.COLS;
+    static final String[] STYLE_IDS = KeyboardArt.STYLE_IDS;
+    static final String[] STYLE_NAMES = KeyboardArt.STYLE_NAMES;
 
-    static final float COLS = 14f;
-    private static final int ROWS = 5;
-
-    /* Keycap styles: id, menu name, key face, key legend, body (behind keys), special-key face. */
-    static final String[] STYLE_IDS = { "white", "cream", "hitek", "grey" };
-    static final String[] STYLE_NAMES = {
-        "White (CoCo 2)", "Cream (TRS-80 Color Computer)", "Black (Hi-Tek)", "Grey (TRS-80)" };
-    private static final int[][] STYLES = {
-        // face,      legend,     body,       special face
-        { 0xFFF1F1EC, 0xFF2B2B2B, 0xFFBDBDB6, 0xFFE2E2DC },
-        { 0xFFEDE4C6, 0xFF2E2A22, 0xFF4A4438, 0xFFDCD2B0 },
-        { 0xFF232326, 0xFFEDEDED, 0xFF0B0B0D, 0xFF17171A },
-        { 0xFFB9BBBD, 0xFF161616, 0xFF5E6165, 0xFFA3A6A9 },
-    };
-    private static final int BREAK_FACE = 0xFFC8342B;
-    // How the keycaps sit, per style: gap between caps (fraction of a key unit),
-    // corner roundness, and how tall the cap's side shows.  The Hi-Tek keys
-    // nearly touch; the CoCo 2's are rounder with visible gaps.
-    private static final float[] GAP = { 0.06f, 0.035f, 0.012f, 0.03f };
-    private static final float[] ROUND = { 0.20f, 0.10f, 0.05f, 0.12f };
-    private static final float[] SIDE = { 0.08f, 0.05f, 0.04f, 0.06f };
     private static final long DOUBLE_TAP_MS = 450;
+    private static final int TINT_LATCHED = 0xFF5B9BE0;
+    private static final int TINT_LOCKED = 0xFFE0A030;
 
     private static final class Key {
-        final String label;     // as printed on the key
-        final String shifted;   // legend when SHIFT is down, or null
+        final KeyboardArt.KeyDef def;
         final int code;
-        final int row;
-        final float x, w;
         final RectF rect = new RectF();
         boolean down;
 
-        Key(String label, String shifted, int code, int row, float x, float w) {
-            this.label = label;
-            this.shifted = shifted;
-            this.code = code;
-            this.row = row;
-            this.x = x;
-            this.w = w;
+        Key(KeyboardArt.KeyDef d) {
+            def = d;
+            code = d.code;
         }
     }
 
     private final List<Key> keys = new ArrayList<>();
     private final SparseIntArray pointerKey = new SparseIntArray();  // pointer id -> key index
 
-    private final Paint fill = new Paint(Paint.ANTI_ALIAS_FLAG);
-    private final Paint text = new Paint(Paint.ANTI_ALIAS_FLAG);
-    private final Paint legend = new Paint(Paint.ANTI_ALIAS_FLAG);
-
     private Listener listener;
     private boolean sticky = true;
     private boolean haptic = true;
-    private boolean overlay = false;
     private int style = 0;
 
     private boolean shiftLatched;
     private boolean shiftLocked;
     private long lastShiftTap;
 
+    // Cached art: the body alone, and the body with every key up.
+    private Bitmap bodyBmp, idleBmp;
+    private String idleState = "";
+    private final Rect src = new Rect();
+    private final RectF dst = new RectF();
+
     CocoKeyboardView(Context c) {
         super(c);
-        text.setTextAlign(Paint.Align.CENTER);
-        text.setColor(0xFFFFFFFF);
-        text.setFakeBoldText(true);
-        legend.setTextAlign(Paint.Align.CENTER);
-        legend.setFakeBoldText(true);
-        buildKeys();
+        for (KeyboardArt.KeyDef d : KeyboardArt.layout()) {
+            keys.add(new Key(d));
+        }
     }
 
     void setListener(Listener l) {
@@ -128,81 +97,24 @@ final class CocoKeyboardView extends View {
     }
 
     void setStyle(String id) {
-        int st = 0;
-        for (int i = 0; i < STYLE_IDS.length; i++) {
-            if (STYLE_IDS[i].equals(id)) {
-                st = i;
-            }
-        }
+        int st = KeyboardArt.styleIndex(id);
         if (st != style) {
             style = st;
+            bodyBmp = null;
             layoutKeys(getWidth(), getHeight());
         }
         invalidate();
     }
 
-    /* Overlay mode (landscape): keys are drawn translucent over the picture. */
+    /* Kept for MainActivity; the keyboard is always drawn opaque now. */
     void setOverlay(boolean on) {
-        overlay = on;
-        invalidate();
     }
 
     /* ---------------------------------------------------------------- */
 
-    private void add(int row, float x, float w, String label, String shifted, int code) {
-        keys.add(new Key(label, shifted, code, row, x, w));
-    }
-
-    private void buildKeys() {
-        // Row 0: 1-0 : - then BREAK, stepped in half a key
-        String[] digits = { "1", "2", "3", "4", "5", "6", "7", "8", "9", "0" };
-        String[] digitsShift = { "!", "\"", "#", "$", "%", "&", "'", "(", ")", "Ø" };
-        int[] digitCodes = { 1, 2, 3, 4, 5, 6, 7, 8, 9, 0 };
-        float x = 0.5f;
-        for (int i = 0; i < 10; i++) {
-            add(0, x++, 1, digits[i], digitsShift[i], digitCodes[i]);
-        }
-        add(0, x++, 1, ":", "*", 0x0a);
-        add(0, x++, 1, "-", "=", 0x0d);
-        add(0, x, 1.2f, "BREAK", null, 0x32);
-
-        // Row 1: UP Q-P @ LEFT RIGHT
-        add(1, 0, 1, "↑", null, 0x2b);
-        x = 1;
-        for (char ch : "QWERTYUIOP".toCharArray()) {
-            add(1, x++, 1, String.valueOf(ch), null, 0x11 + (ch - 'A'));
-        }
-        add(1, x++, 1, "@", null, 0x10);
-        add(1, x++, 1, "←", null, 0x2d);
-        add(1, x, 1, "→", null, 0x2e);
-
-        // Row 2: DOWN A-L ; ENTER CLEAR
-        add(2, 0.25f, 1, "↓", null, 0x2c);
-        x = 1.25f;
-        for (char ch : "ASDFGHJKL".toCharArray()) {
-            add(2, x++, 1, String.valueOf(ch), null, 0x11 + (ch - 'A'));
-        }
-        add(2, x++, 1, ";", "+", 0x0b);
-        add(2, x, 1.6f, "ENTER", null, 0x30);
-        add(2, x + 1.6f, 1.1f, "CLEAR", null, 0x31);
-
-        // Row 3: SHIFT Z-M , . / SHIFT
-        add(3, 0, 1.5f, "SHIFT", null, D_SHIFT);
-        x = 1.5f;
-        for (char ch : "ZXCVBNM".toCharArray()) {
-            add(3, x++, 1, String.valueOf(ch), null, 0x11 + (ch - 'A'));
-        }
-        add(3, x++, 1, ",", "<", 0x0c);
-        add(3, x++, 1, ".", ">", 0x0e);
-        add(3, x++, 1, "/", "?", 0x0f);
-        add(3, x, 1.5f, "SHIFT", null, D_SHIFT);
-
-        // Row 4: SPACE
-        add(4, 3f, 8f, "SPACE", null, 0x2f);
-    }
-
     @Override
     protected void onSizeChanged(int w, int h, int ow, int oh) {
+        bodyBmp = null;
         layoutKeys(w, h);
     }
 
@@ -210,15 +122,10 @@ final class CocoKeyboardView extends View {
         if (w <= 0 || h <= 0) {
             return;
         }
-        float cw = w / COLS;
-        float ch = h / (float) ROWS;
-        float gap = Math.max(0.8f, Math.min(cw, ch) * GAP[style]);
+        KeyboardArt.Style st = KeyboardArt.style(style);
         for (Key k : keys) {
-            k.rect.set(k.x * cw + gap, k.row * ch + gap, (k.x + k.w) * cw - gap, (k.row + 1) * ch - gap * 1.8f);
+            KeyboardArt.keyRect(k.def, w, h, st, k.rect);
         }
-        float unit = Math.min(cw, ch);
-        text.setTextSize(unit * 0.44f);
-        legend.setTextSize(unit * 0.27f);
     }
 
     private boolean shiftActive() {
@@ -230,69 +137,56 @@ final class CocoKeyboardView extends View {
         return shiftLatched || shiftLocked;
     }
 
-    @Override
-    protected void onDraw(Canvas c) {
-        int[] st = STYLES[style];
-        c.drawColor(overlay ? (st[2] & 0x00FFFFFF) | 0xAA000000 : st[2]);
-        boolean shifted = shiftActive();
-        int alpha = overlay ? 0xE0000000 : 0xFF000000;
-        for (Key k : keys) {
-            boolean isBreak = k.code == 0x32;
-            int face = isBreak ? BREAK_FACE : (k.label.length() > 1 || k.code == 0x2b ? st[3] : st[0]);
-            int ink = isBreak ? 0xFFFFFFFF : st[1];
-            if (k.code == D_SHIFT && shiftLocked) {
-                face = 0xFFE0A030;
-            } else if (k.code == D_SHIFT && (shiftLatched || k.down)) {
-                face = 0xFF5B9BE0;
-            }
-            float r = Math.min(k.rect.width(), k.rect.height()) * ROUND[style];
-            float lift = k.down ? 0 : k.rect.height() * SIDE[style];
-            RectF f = new RectF(k.rect.left, k.rect.top + (k.down ? lift : 0),
-                    k.rect.right, k.rect.bottom - (k.down ? 0 : lift));
-            // the key's side: a darker copy below the face
-            if (!k.down) {
-                fill.setColor((shade(face, 0.62f) & 0x00FFFFFF) | alpha);
-                c.drawRoundRect(new RectF(f.left, f.top + lift, f.right, f.bottom + lift), r, r, fill);
-            }
-            fill.setColor((face & 0x00FFFFFF) | alpha);
-            c.drawRoundRect(f, r, r, fill);
-            // a soft highlight across the top of the cap
-            fill.setColor((shade(face, 1.18f) & 0x00FFFFFF) | (overlay ? 0x90000000 : 0xB0000000));
-            c.drawRoundRect(new RectF(f.left + r * 0.4f, f.top + r * 0.3f, f.right - r * 0.4f,
-                    f.top + f.height() * 0.38f), r * 0.6f, r * 0.6f, fill);
+    private int shiftTint() {
+        return shiftLocked ? TINT_LOCKED : (shiftLatched ? TINT_LATCHED : 0);
+    }
 
-            text.setColor(ink);
-            legend.setColor(ink);
-            String label = k.label;
-            String sub = (k.shifted != null) ? k.shifted : null;
-            float size = text.getTextSize();
-            if (shifted && sub != null && !k.label.equals("0")) {
-                // SHIFT is down: the shifted symbol is what you'll get; bring it forward
-                label = sub;
-                sub = k.label;
+    private void ensureArt(int w, int h) {
+        KeyboardArt.Style st = KeyboardArt.style(style);
+        if (bodyBmp == null || bodyBmp.getWidth() != w || bodyBmp.getHeight() != h) {
+            bodyBmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888);
+            KeyboardArt.drawBody(new Canvas(bodyBmp), w, h, st);
+            idleBmp = null;
+        }
+        boolean shifted = shiftActive();
+        String state = style + "/" + shifted + "/" + shiftTint();
+        if (idleBmp == null || !state.equals(idleState)) {
+            if (idleBmp == null) {
+                idleBmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888);
             }
-            if (label.length() > 2) {
-                text.setTextSize(Math.min(size * 0.55f, f.width() / label.length() * 1.1f));
+            Canvas c = new Canvas(idleBmp);
+            c.drawBitmap(bodyBmp, 0, 0, null);
+            for (Key k : keys) {
+                KeyboardArt.drawKey(c, k.rect, k.def, st, false, shifted,
+                        k.code == D_SHIFT ? shiftTint() : 0, true);
             }
-            boolean two = sub != null;
-            float cy = (two ? f.top + f.height() * 0.68f : f.centerY())
-                    - (text.descent() + text.ascent()) / 2f;
-            c.drawText(label, f.centerX(), cy, text);
-            text.setTextSize(size);
-            if (two) {
-                legend.setTextAlign(Paint.Align.CENTER);
-                legend.setAlpha(shifted ? 0x70 : 0xFF);
-                c.drawText(sub, f.centerX(), f.top + f.height() * 0.36f, legend);
-                legend.setAlpha(0xFF);
-            }
+            idleState = state;
         }
     }
 
-    private static int shade(int color, float m) {
-        int r = Math.min(255, Math.round(((color >> 16) & 255) * m));
-        int g = Math.min(255, Math.round(((color >> 8) & 255) * m));
-        int b = Math.min(255, Math.round((color & 255) * m));
-        return 0xFF000000 | (r << 16) | (g << 8) | b;
+    @Override
+    protected void onDraw(Canvas c) {
+        int w = getWidth(), h = getHeight();
+        if (w <= 0 || h <= 0) {
+            return;
+        }
+        ensureArt(w, h);
+        c.drawBitmap(idleBmp, 0, 0, null);
+        KeyboardArt.Style st = KeyboardArt.style(style);
+        boolean shifted = shiftActive();
+        for (Key k : keys) {
+            if (!k.down) {
+                continue;
+            }
+            // put the bare body back under the key (its shadow included), then the key pressed down
+            // (only out to the gap round it, so the neighbours are left alone)
+            float m = KeyboardArt.gapPx(w, h, st) * 0.95f;
+            src.set(Math.max(0, (int) (k.rect.left - m)), Math.max(0, (int) (k.rect.top - m)),
+                    Math.min(w, (int) (k.rect.right + m) + 1), Math.min(h, (int) (k.rect.bottom + m) + 1));
+            dst.set(src.left, src.top, src.right, src.bottom);
+            c.drawBitmap(bodyBmp, src, dst, null);
+            KeyboardArt.drawKey(c, k.rect, k.def, st, true, shifted, k.code == D_SHIFT ? shiftTint() : 0, false);
+        }
     }
 
     /* ---------------------------------------------------------------- */
