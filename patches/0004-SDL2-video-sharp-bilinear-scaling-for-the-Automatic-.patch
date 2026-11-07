@@ -1,0 +1,143 @@
+From 8bb836be9ff4a56f1521dd9aac41b0381b957079 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sat, 7 Nov 2026 19:28:44 +0000
+Subject: [PATCH] SDL2 video: sharp bilinear scaling for the Automatic filter
+
+Plain linear scaling of the small CoCo picture blurs every pixel edge.  With
+the Automatic filter, enlarge the picture by a whole number with nearest
+neighbour into a render-target texture, then scale that to the picture area
+with linear filtering.  Measured on a 512-pixel-wide picture shown 1080 wide:
+mean edge ramp 2.92 px with linear, 1.50 px now, 1.00 px with nearest.
+
+Also forget textures when the renderer is destroyed (they die with it) and
+free the new texture handle on shutdown.
+---
+ src/sdl2/vo_sdl2.c | 67 ++++++++++++++++++++++++++++++++++++++++++----
+ 1 file changed, 62 insertions(+), 5 deletions(-)
+
+diff --git a/src/sdl2/vo_sdl2.c b/src/sdl2/vo_sdl2.c
+index d73e2e21..951638e1 100644
+--- a/src/sdl2/vo_sdl2.c
++++ b/src/sdl2/vo_sdl2.c
+@@ -63,6 +63,11 @@ struct vo_sdl_interface {
+ 
+ 	SDL_Renderer *sdl_renderer;
+ 
++	// "Sharp bilinear" scaling (the Automatic filter): the picture is first
++	// enlarged by a whole number with hard pixel edges into this target
++	// texture, then scaled the rest of the way smoothly.  NULL when not used.
++	SDL_Texture *upscale;
++
+ 	struct vo_window_area window_area;
+ 	bool scale_60hz;
+ };
+@@ -264,6 +269,9 @@ static void recreate_renderer(struct ui_sdl2_interface *uisdl2) {
+ 	if (vosdl->sdl_renderer) {
+ 		SDL_DestroyRenderer(vosdl->sdl_renderer);
+ 		vosdl->sdl_renderer = NULL;
++		// Its textures went with it.
++		vosdl->texture.texture = NULL;
++		vosdl->upscale = NULL;
+ 	}
+ 
+ 	if (vo->vsync) {
+@@ -297,15 +305,45 @@ static void recreate_texture(struct ui_sdl2_interface *uisdl2) {
+ 		SDL_DestroyTexture(vosdl->texture.texture);
+ 		vosdl->texture.texture = NULL;
+ 	}
++	if (vosdl->upscale) {
++		SDL_DestroyTexture(vosdl->upscale);
++		vosdl->upscale = NULL;
++	}
+ 
+ 	int vp_w = vr->viewport.w;
+ 	int vp_h = vr->viewport.h;
+ 
++	// Automatic: sharp bilinear.  Enlarge by a whole number (nearest
++	// neighbour, so pixel edges stay hard), then let the display scale that
++	// down to the window with linear filtering.  Plain linear scaling of a
++	// small picture blurs every edge.  Only worth it when enlarging.
++	bool sharp = false;
++	int k = 1;
++	if (vo->gl_filter == VO_GL_FILTER_AUTO && vp_w > 0 && vp_h > 0
++	    && vosdl->window_area.w > vp_w) {
++		int kw = (vosdl->window_area.w + vp_w - 1) / vp_w;
++		int kh = vosdl->window_area.h > vp_h ? (vosdl->window_area.h + vp_h - 1) / vp_h : 1;
++		k = kw > kh ? kw : kh;
++		if (k > 4) {
++			k = 4;
++		}
++		SDL_RendererInfo ri = {0};
++		int maxw = 2048, maxh = 2048;
++		if (SDL_GetRendererInfo(vosdl->sdl_renderer, &ri) == 0) {
++			if (ri.max_texture_width > 0) maxw = ri.max_texture_width;
++			if (ri.max_texture_height > 0) maxh = ri.max_texture_height;
++		}
++		while (k > 1 && (vp_w * k > maxw || vp_h * k > maxh)) {
++			k--;
++		}
++		sharp = (k > 1) && (ri.flags & SDL_RENDERER_TARGETTEXTURE);
++	}
++
+ 	// Set scaling method according to options and window dimensions
+-	if (!vosdl->scale_60hz && (vo->gl_filter == VO_GL_FILTER_NEAREST ||
+-				   (vo->gl_filter == VO_GL_FILTER_AUTO &&
+-				    (vosdl->window_area.w % vp_w) == 0 &&
+-				    (vosdl->window_area.h % vp_h) == 0))) {
++	if (sharp || (!vosdl->scale_60hz && (vo->gl_filter == VO_GL_FILTER_NEAREST ||
++					     (vo->gl_filter == VO_GL_FILTER_AUTO &&
++					      (vosdl->window_area.w % vp_w) == 0 &&
++					      (vosdl->window_area.h % vp_h) == 0)))) {
+ 		SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "nearest");
+ 	} else {
+ 		SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "linear");
+@@ -318,6 +356,15 @@ static void recreate_texture(struct ui_sdl2_interface *uisdl2) {
+ 		abort();
+ 	}
+ 
++	if (sharp) {
++		SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "linear");
++		vosdl->upscale = SDL_CreateTexture(vosdl->sdl_renderer, vosdl->texture.format, SDL_TEXTUREACCESS_TARGET, vp_w * k, vp_h * k);
++		if (!vosdl->upscale) {
++			// Not available: fall back to plain scaling of the picture
++			SDL_SetTextureScaleMode(vosdl->texture.texture, SDL_ScaleModeLinear);
++		}
++	}
++
+ 	vr->buffer_pitch = vr->viewport.w;
+ }
+ 
+@@ -488,6 +535,7 @@ static void vo_sdl_free(void *sptr) {
+ 
+ 	free(vosdl->texture.pixels);
+ 	vosdl->texture.pixels = NULL;
++	vosdl->upscale = NULL;  // destroyed with the renderer
+ 
+ 	// TODO: I used to have a note here that destroying the renderer caused
+ 	// a SEGV deep down in the video driver.  This doesn't seem to happen
+@@ -513,12 +561,21 @@ static void draw(void *sptr) {
+ 	struct vo_render *vr = vo->renderer;
+ 
+ 	SDL_UpdateTexture(vosdl->texture.texture, NULL, vosdl->texture.pixels, vr->viewport.w * vosdl->texture.pixel_size);
++	SDL_Texture *src = vosdl->texture.texture;
++	if (vosdl->upscale) {
++		// Whole-number enlargement with hard edges...
++		SDL_SetRenderTarget(vosdl->sdl_renderer, vosdl->upscale);
++		SDL_RenderCopy(vosdl->sdl_renderer, vosdl->texture.texture, NULL, NULL);
++		SDL_SetRenderTarget(vosdl->sdl_renderer, NULL);
++		src = vosdl->upscale;
++	}
+ 	SDL_RenderClear(vosdl->sdl_renderer);
+ 	SDL_Rect dstrect = {
+ 		.x = vo->picture_area.x, .y = vo->picture_area.y,
+ 		.w = vo->picture_area.w, .h = vo->picture_area.h
+ 	};
+-	SDL_RenderCopy(vosdl->sdl_renderer, vosdl->texture.texture, NULL, &dstrect);
++	// ...then the smooth scale down (or up) to the picture area.
++	SDL_RenderCopy(vosdl->sdl_renderer, src, NULL, &dstrect);
+ 	SDL_RenderPresent(vosdl->sdl_renderer);
+ }
+ 
+-- 
+2.43.0
+

@@ -56,8 +56,11 @@ run() {  # name scenario [settings.conf lines...]
 	cp "$ROMS"/bas13.rom "$ROMS"/extbas11.rom "$ROMS"/disk11.rom "$T/roms/"
 	[ -n "${SDCDOS:-}" ] && cp "$SDCDOS" "$T/roms/sdcdos.rom"
 	: > "$T/settings.conf"; for l in "$@"; do echo "$l" >> "$T/settings.conf"; done
-	head -c 161280 /dev/zero > "$T/blank.dsk"; head -c 161280 /dev/zero > "$T/blank2.dsk"
-	(cd /; XROAR_HOME=$T TEST_DSK=$T/blank.dsk TEST_DSK2=$T/blank2.dsk SCENARIO=$sc SDL_VIDEODRIVER=offscreen SDL_AUDIODRIVER=dummy \
+	mkdir -p "$T/paks"; python3 -I -c "
+# A tiny Program Pak: at \$C000, print PAKSTART OK on the printer through BASIC's CHROUT, then spin.
+code = bytes([0x86,0xFE, 0x97,0x6F, 0x8E,0xC0,0x15, 0xA6,0x80, 0x27,0x06, 0xAD,0x9F,0xA0,0x02, 0x20,0xF6, 0x0F,0x6F, 0x20,0xFE]) + b'PAKSTART OK\\r\\0'
+open('$T/paks/test.rom','wb').write(code + bytes(8192 - len(code)))"; head -c 161280 /dev/zero > "$T/blank.dsk"; head -c 161280 /dev/zero > "$T/blank2.dsk"
+	(cd /; XROAR_HOME=$T TEST_PAK=$T/paks/test.rom TEST_DSK=$T/blank.dsk TEST_DSK2=$T/blank2.dsk SCENARIO=$sc SDL_VIDEODRIVER=offscreen SDL_AUDIODRIVER=dummy \
 		timeout 90 "$B/xroar-hosttest" -lp-file "$T/out.txt" > /dev/null 2>&1 || true)
 	echo "$T"
 }
@@ -69,6 +72,56 @@ echo "== keys: OP_KEY presses type into BASIC"
 T=$(run keys keys); check "BASIC received the typed line" "$T/out.txt" "KEYS OK"
 echo "== shift: SHIFT is not released before the key typed with it"
 T=$(run shiftrapid shiftrapid); check "shifted # and quotes arrive shifted" "$T/out.txt" "RAPID OK"
+echo "== pak: a cartridge in paks/ can be inserted and ejected"
+T=$(run pak pak "cart=rsdos")
+paks=$(tr '\r\n' '  ' < "$T/out.txt")
+echo "  printer: [$paks]"
+check "disk ROM at \$C000 before (68)" "$T/out.txt" "A= 68"
+check "the pak started itself and printed (PAKSTART OK)" "$T/out.txt" "PAKSTART OK"
+check "disk ROM back at \$C000 after ejecting (68)" "$T/out.txt" "C= 68"
+check "message for the app" "$T/xroar-log.txt" "Cartridge: test.rom"
+echo "== program: a typed multi-line program arrives intact, and 249 is the real line limit"
+python3 -I -c "
+lines = ['10 REM TEST PROGRAM', '20 FOR I=1 TO 3', '30 PRINT I', '40 NEXT I', '50 PRINT \"DONE\"',
+         '60 REM ' + 'X' * 242,            # exactly 249 characters
+         '70 DATA 1,2,3', '80 A\$=\"ABC\"', '90 PRINT A\$',
+         '100 REM ' + 'Y' * 248,           # 256 characters: past the limit
+         '110 END']
+open('$W/program.bas', 'w').write(chr(10).join(lines) + chr(10))"
+T=$(TEST_PROGRAM=$W/program.bas TYPE_WAIT=14 run program program)
+python3 -I - "$T/out.txt" <<'PY' && echo "  ok   all 11 lines listed; the 249-character line intact; the 256-character line cut to 249" || { echo "  FAIL program did not come back as expected"; fail=1; }
+import re, sys
+got = {}
+for l in open(sys.argv[1], 'rb').read().decode('latin-1').replace('\r', '\n').split('\n'):
+    m = re.match(r'(\d+) ', l)
+    if m: got[int(m.group(1))] = l
+ok = sorted(got) == [10,20,30,40,50,60,70,80,90,100,110]
+ok = ok and got[10] == '10 REM TEST PROGRAM' and got[20] == '20 FOR I=1 TO 3' and got[80] == '80 A$="ABC"'
+ok = ok and len(got[60]) == 249 and got[60] == '60 REM ' + 'X' * 242
+ok = ok and len(got[100]) == 249
+print('lines:', sorted(got), 'len60:', len(got.get(60, '')), 'len100:', len(got.get(100, '')), file=sys.stderr)
+sys.exit(0 if ok else 1)
+PY
+echo "== sound: CoCoXSID and Games Master Cartridge in a Multi-Pak with the disk controller"
+sidcheck() {  # run dir
+	local T=$1
+	check "ENV3 reads full level (the SID is answering in SCS)" "$T/out.txt" "ENV= 255"
+	check "the disk ROM is still at \$C000 (CTS stayed on the disk slot)" "$T/out.txt" "C= 68"
+	python3 -I -c "
+import re,sys
+t=open(sys.argv[1],'rb').read().decode('latin-1').replace('\r','\n')
+m=re.search(r'OSC=\s*(\d+)\s+(\d+)\s+(\d+)',t)
+sys.exit(0 if m and len({m.group(1),m.group(2),m.group(3)})>=2 else 1)" "$T/out.txt" \
+		&& echo "  ok   OSC3 changes between reads (the oscillator runs)" || { echo "  FAIL OSC3 did not change"; fail=1; }
+	check "Multi-Pak was built with the SID in slot 1" "$T/xroar-log.txt" "part:cocoxsid"
+}
+T=$(run sid sid "sound=cocoxsid" "cart=rsdos"); echo "  printer: [$(tr '\r\n' '  ' < "$T/out.txt")]"; sidcheck "$T"
+check "SID produced audio (peak logged when the cartridge was removed)" "$T/xroar-log.txt" "cocoxsid\] [0-9]* audio frames, peak level 0\.[1-9]"
+T=$(run sidlive sidlive "cart=rsdos"); echo "  live: [$(tr '\r\n' '  ' < "$T/out.txt")]"; sidcheck "$T"
+check "app told the user" "$T/xroar-log.txt" "Cartridge: Multi-Pak with cocoxsid and disk"
+T=$(run gmc gmc "sound=gmc" "cart=rsdos"); echo "  gmc: [$(tr '\r\n' '  ' < "$T/out.txt")]"
+check "GMC in slot 1 took SN76489 writes and BASIC carried on" "$T/out.txt" "GMC DONE C= 68"
+check "Multi-Pak was built with the GMC" "$T/xroar-log.txt" "part:gmc"
 echo "== text: OP_TYPE auto-types"
 T=$(run text text); check "BASIC received the typed line" "$T/out.txt" "TEXT OK"
 echo "== joy: on-screen joystick through kjoy0"
@@ -102,6 +155,25 @@ check "machine really is a 2B" "$T/xroar-log.txt" "part:coco\]"
 echo "== misc: live settings, resets, tape, disks (must not crash)"
 T=$(run misc misc "cart=rsdos"); check "ran to the end" "$T/xroar-log.txt" "android: set gain = -50"
 for a in "set machine = coco2bus" "set cart = none" "set cart = rsdos" "Floppy drive 0: blank.dsk" "Floppy drive 1: blank.dsk"; do check "$a" "$T/xroar-log.txt" "$a"; done
+echo "== picture: default settings fill the width at a true 4:3, sharply"
+shot() {  # name, settings.conf text ("" for none) -> "fill_w fill_h aspect ramp"
+	local T=$W/run-$1; rm -rf "$T"; mkdir -p "$T/roms"
+	cp "$ROMS"/bas13.rom "$ROMS"/extbas11.rom "$ROMS"/disk11.rom "$T/roms/"
+	printf "$2" > "$T/settings.conf"
+	(cd /; XROAR_HOME=$T SCENARIO=screenfull TAIL=8 XROAR_DUMP_FRAME=$T/frame.ppm XROAR_DUMP_DELAY_MS=9000 \
+		SDL_VIDEODRIVER=offscreen SDL_AUDIODRIVER=dummy timeout 40 "$B/xroar-hosttest" -g 1080x810 > /dev/null 2>&1 || true)
+	python3 -I "$HERE/tools/hosttest/measure.py" "$T/frame.ppm"
+}
+read fw fh asp ramp <<< "$(shot pic-default '')"
+echo "  default: fills $fw x $fh of the surface, aspect $asp, edge ramp $ramp px"
+python3 -I -c "import sys; fw,fh,a,r=map(float,sys.argv[1:]); sys.exit(0 if fw>0.99 and fh>0.99 and 1.31<a<1.36 else 1)" $fw $fh $asp $ramp \
+	&& echo "  ok   fills the surface at 4:3" || { echo "  FAIL picture does not fill the surface at 4:3"; fail=1; }
+python3 -I -c "import sys; fw,fh,a,r=map(float,sys.argv[1:]); sys.exit(0 if r<1.9 else 1)" $fw $fh $asp $ramp \
+	&& echo "  ok   pixel edges are sharp (under 1.9 px)" || { echo "  FAIL pixel edges are soft"; fail=1; }
+read fw2 fh2 asp2 ramp2 <<< "$(shot pic-old 'picture=auto\nntsc_scaling=1\ngl_filter=linear\n')"
+echo "  old settings: fills $fw2 x $fh2, aspect $asp2, ramp $ramp2 (what v5 showed)"
+python3 -I -c "import sys; fw,fh,a,r=map(float,sys.argv[1:]); sys.exit(0 if (fw<0.9 or a<1.2) and r>2.2 else 1)" $fw2 $fh2 $asp2 $ramp2 \
+	&& echo "  ok   the test does tell the old look from the new one" || { echo "  FAIL measure.py cannot tell old from new"; fail=1; }
 echo "== display: the picture follows the surface"
 check "display line logged" "$T/xroar-log.txt" "android: display: window"
 if [ -n "${SDCDOS:-}" ]; then

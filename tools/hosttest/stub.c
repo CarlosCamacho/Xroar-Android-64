@@ -7,11 +7,14 @@
  *
  * Scenario (env SCENARIO), run once XRoar has booted:
  *   keys    type a BASIC line with OP_KEY presses (CoCo keyboard matrix)
+ *   sets    apply the live settings in $SETS (k=v;k=v), then wait
  *   shiftrapid  shifted keys with SHIFT released right after the key
  *   text    type a BASIC line with OP_TYPE (auto-typing)
  *   joy     hold the on-screen joystick Left, then read JOYSTK(0)
  *   nojoy   the same without pressing anything (centre value)
  *   ram16   change RAM to 16K live, then read BASIC's MEM (ram64: no change)
+ *   sid, sidlive, gmc  a sound cartridge in a Multi-Pak (from settings, or switched on live)
+ *   pak     insert a cartridge (a tiny program Pak), see it start, eject, read $C000
  *   sdcdisk disk insert/eject with a CoCoSDC plugged in
  *   misc    live settings, resets, tape and disk commands; no output check
  * Each BASIC line writes a marker to the emulated printer (-lp-file), so
@@ -100,6 +103,23 @@ static void *scenario(void *arg) {
 	sleep(4);  // boot
 	if (!strcmp(name, "keys")) {
 		press_text("PRINT#-2,\"KEYS OK\"\n");
+	} else if (!strcmp(name, "sets")) {
+		// SETS="k=v;k=v": live settings after boot (for the frame-dump tests)
+		char *sets = getenv("SETS") ? strdup(getenv("SETS")) : NULL;
+		for (char *tok = sets ? strtok(sets, ";") : NULL; tok; tok = strtok(NULL, ";")) {
+			cmd(OP_SET, 0, 0, tok);
+			usleep(200000);
+		}
+		free(sets);
+	} else if (!strcmp(name, "screenfull")) {
+		// fill the screen with text so the picture's edges show: all 16 rows
+		char *sets = getenv("SETS") ? strdup(getenv("SETS")) : NULL;
+		for (char *tok = sets ? strtok(sets, ";") : NULL; tok; tok = strtok(NULL, ";")) {
+			cmd(OP_SET, 0, 0, tok);
+			usleep(200000);
+		}
+		free(sets);
+		cmd(OP_TYPE, 0, 0, "CLS:FORI=1TO15:PRINT@(I-1)*32,RIGHT$(\"0\"+MID$(STR$(I),2),2)+\"..............................\";:NEXT:PRINT@480,\"16.....LAST.ROW.....\";\n");
 	} else if (!strcmp(name, "shiftrapid")) {
 		press_text("PRINT");
 		rapid_shifted(3);                 // #
@@ -133,6 +153,52 @@ static void *scenario(void *arg) {
 			sleep(4);
 		}
 		cmd(OP_TYPE, 0, 0, "PRINT#-2,\"MEM=\";MEM\n");
+	} else if (!strcmp(name, "pakdbg")) {
+		cmd(OP_LOAD, 0, 0, getenv("TEST_PAK"));
+		sleep(3);
+		cmd(OP_TYPE, 0, 0, "PRINT#-2,\"P=\";PEEK(49152);PEEK(49153);PEEK(49154);PEEK(49200)\n");
+		sleep(2);
+		cmd(OP_TYPE, 0, 0, "PRINT#-2,\"Q=\";PEEK(&HC000)\n");
+	} else if (!strcmp(name, "sid") || !strcmp(name, "sidlive") || !strcmp(name, "gmc")) {
+		// A CoCoXSID (or a Games Master Cartridge) in Multi-Pak slot 1 with the disk
+		// controller in slot 4.  Select the sound slot for SCS ($FF7F = $30; CTS stays
+		// on the disk), play a sawtooth on voice 3 and read the chip's registers back.
+		if (!strcmp(name, "sidlive")) {
+			cmd(OP_SET, 0, 0, "sound=cocoxsid");   // changed while running: builds the Multi-Pak
+			sleep(5);
+		}
+		if (!strcmp(name, "gmc")) {
+			cmd(OP_TYPE, 0, 0, "POKE&HFF7F,&H30:POKE&HFF41,&H9F:POKE&HFF41,&H8F:POKE&HFF41,&H0F:PRINT#-2,\"GMC DONE C=\";PEEK(&HC000)\n");
+			sleep(4);
+		} else {
+			cmd(OP_TYPE, 0, 0, "POKE&HFF7F,&H30:POKE&HFF58,15:POKE&HFF4E,0:POKE&HFF4F,&H40:POKE&HFF53,0:POKE&HFF54,&HF0:POKE&HFF52,&H21\n");
+			sleep(3);
+			cmd(OP_TYPE, 0, 0, "FORI=1TO400:NEXT:PRINT#-2,\"ENV=\";PEEK(&HFF5C):PRINT#-2,\"OSC=\";PEEK(&HFF5B);PEEK(&HFF5B);PEEK(&HFF5B):PRINT#-2,\"C=\";PEEK(&HC000)\n");
+			sleep(6);
+		}
+	} else if (!strcmp(name, "program")) {
+		// a multi-line program (TEST_PROGRAM file), typed in one go, then listed on the printer
+		const char *f = getenv("TEST_PROGRAM");
+		FILE *fp = f ? fopen(f, "rb") : NULL;
+		static char buf[65536];
+		size_t n = fp ? fread(buf, 1, sizeof(buf) - 1, fp) : 0;
+		buf[n] = 0;
+		if (fp) fclose(fp);
+		cmd(OP_TYPE, 0, 0, buf);
+		sleep(getenv("TYPE_WAIT") ? atoi(getenv("TYPE_WAIT")) : 10);
+		cmd(OP_TYPE, 0, 0, "LLIST\n");
+		sleep(6);
+	} else if (!strcmp(name, "pak")) {
+		// PEEK(&HC000): the disk controller's ROM starts "DK" (68).  The pak made by
+		// run.sh is a little program that prints PAKSTART OK on the printer when it
+		// starts.  Inserting it resets the machine and starts it, as on a real CoCo.
+		cmd(OP_TYPE, 0, 0, "PRINT#-2,\"A=\";PEEK(&HC000)\n");
+		sleep(2);
+		cmd(OP_LOAD, 0, 0, getenv("TEST_PAK"));
+		sleep(4);
+		cmd(OP_SET, 0, 0, "cart=rsdos");   // eject: the chosen cartridge comes back (hard reset)
+		sleep(4);
+		cmd(OP_TYPE, 0, 0, "PRINT#-2,\"C=\";PEEK(&HC000)\n");
 	} else if (!strcmp(name, "sdcdisk")) {
 		const char *dsk = getenv("TEST_DSK");
 		const char *dsk2 = getenv("TEST_DSK2");

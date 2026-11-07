@@ -22,6 +22,7 @@ import android.view.ViewGroup;
 import android.view.WindowInsets;
 import android.view.WindowManager;
 import android.widget.Button;
+import android.widget.TextView;
 import android.widget.CheckBox;
 import android.widget.EditText;
 import android.widget.FrameLayout;
@@ -29,6 +30,7 @@ import android.widget.LinearLayout;
 import android.widget.PopupMenu;
 import android.widget.Toast;
 
+import java.io.ByteArrayInputStream;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.InputStream;
@@ -44,8 +46,9 @@ import org.libsdl.app.SDLActivity;
  * nativeCommand(), whose OP_* constants must match android_glue.h.
  *
  * Layout: in portrait the picture sits at the top (4:3, full width) with the
- * keyboard, pad or settings below it.  In landscape the picture fills the
- * screen and the keyboard, pad, toolbar and settings float over it.
+ * keyboard, pad, settings or Paks below it.  In landscape the picture is on
+ * the left at full height and a column on the right holds the toolbar and a
+ * Keyboard / Joystick tab (or the settings or Paks, which replace the tab).
  */
 public class MainActivity extends SDLActivity {
     private static final String TAG = "XRoar";
@@ -71,6 +74,9 @@ public class MainActivity extends SDLActivity {
     static final int REQ_TAPE = 110;
     static final int REQ_LOAD = 111;
     static final int REQ_RUN = 112;
+    static final int REQ_PAKADD = 113;
+    static final int REQ_TYPEFILE = 114;
+    static final int REQ_ROM = 120;    // + RomManager.Slot ordinal
 
     static native void nativeCommand(int op, int a, int b, String s);
     static native String nativePollMessage();
@@ -83,8 +89,17 @@ public class MainActivity extends SDLActivity {
     private CocoKeyboardView kbd;
     private PadView pad;
     private SettingsPanel panel;
+    private PaksPanel paksPanel;
+    private Button tabKeys;
+    private Button tabJoy;
+    private final PakLibrary[] pakLibraryRef = new PakLibrary[1];
+    private RomManager roms;
+    private String currentPak;
+    private EditText typeBox;          // the Type… dialog's text box, while it is open
+    private Runnable typeChanged;
 
     private boolean settingsOpen;
+    private boolean paksOpen;
     private int insetL, insetT, insetR, insetB;
     private long lastBack;
 
@@ -133,6 +148,9 @@ public class MainActivity extends SDLActivity {
             Log.e(TAG, "can't set XROAR_HOME", e);
         }
         settings = new Settings(homeDir());
+        pakLibraryRef[0] = new PakLibrary(homeDir());
+        pakLibraryRef[0].dir().mkdirs();
+        roms = new RomManager(homeDir());
         super.onCreate(savedInstanceState);
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         if (mLayout != null) {
@@ -228,6 +246,7 @@ public class MainActivity extends SDLActivity {
     /* Machine and RAM changes rebuild the emulated machine, which drops its
      * cartridge: put the chosen cartridge back. */
     void applyMachineSetting(String key, String value) {
+        currentPak = null;
         apply(key, value);
         sendSet("cart", settings.get("cart", "auto"));
     }
@@ -237,24 +256,6 @@ public class MainActivity extends SDLActivity {
         if ("kjoy0".equals(value) && !settings.getBool("ui_pad", false)) {
             setPadVisible(true);
         }
-    }
-
-    /* The first of these names found in roms/ or the app folder, or null. */
-    String findRom(String[] labelAndNames) {
-        File home = homeDir();
-        File[] dirs = { new File(home, "roms"), home };
-        String[] exts = { ".rom", ".ROM", "" };
-        for (int i = 1; i < labelAndNames.length; i++) {
-            for (File d : dirs) {
-                for (String e : exts) {
-                    File f = new File(d, labelAndNames[i] + e);
-                    if (f.isFile()) {
-                        return f.getName();
-                    }
-                }
-            }
-        }
-        return null;
     }
 
     /* ---------------------------------------------------------------- */
@@ -314,8 +315,9 @@ public class MainActivity extends SDLActivity {
             });
             m.show();
         });
+        Button paksButton = toolButton("Paks", v -> openPaks());
         Button menuButton = toolButton("Menu", v -> openSettings());
-        for (Button b : new Button[] { keysButton, padButton, typeButton, resetButton, menuButton }) {
+        for (Button b : new Button[] { keysButton, padButton, typeButton, resetButton, paksButton, menuButton }) {
             toolbar.addView(b, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f));
         }
         root.addView(toolbar, new FrameLayout.LayoutParams(0, 0));
@@ -323,6 +325,18 @@ public class MainActivity extends SDLActivity {
         panel = new SettingsPanel(this);
         panel.setVisibility(View.GONE);
         root.addView(panel, new FrameLayout.LayoutParams(0, 0));
+
+        paksPanel = new PaksPanel(this, pakLibraryRef[0]);
+        paksPanel.setVisibility(View.GONE);
+        root.addView(paksPanel, new FrameLayout.LayoutParams(0, 0));
+
+        // Landscape: these two pick what the right-hand column shows.
+        tabKeys = toolButton("Keyboard", v -> setLandscapeTab("keys"));
+        tabJoy = toolButton("Joystick", v -> setLandscapeTab("joy"));
+        tabKeys.setTextSize(15);
+        tabJoy.setTextSize(15);
+        root.addView(tabKeys, new FrameLayout.LayoutParams(0, 0));
+        root.addView(tabJoy, new FrameLayout.LayoutParams(0, 0));
 
         applyUiSettings();
 
@@ -358,6 +372,12 @@ public class MainActivity extends SDLActivity {
         boolean haptic = settings.getBool("ui_haptic", true);
         kbd.setSticky(sticky);
         kbd.setHaptic(haptic);
+        kbd.setStyle(settings.get("ui_kbd_style", "white"));
+        boolean joyTab = "joy".equals(settings.get("ui_tab", "keys"));
+        if (tabKeys != null) {
+            tabKeys.setTextColor(joyTab ? Color.WHITE : 0xFF6CB0FF);
+            tabJoy.setTextColor(joyTab ? 0xFF6CB0FF : Color.WHITE);
+        }
         pad.setHaptic(haptic);
         boolean kv = settings.getBool("ui_kbd", true);
         boolean pv = settings.getBool("ui_pad", false);
@@ -398,9 +418,11 @@ public class MainActivity extends SDLActivity {
         int tb = dp(44);
         boolean kv = settings.getBool("ui_kbd", true);
         boolean pv = settings.getBool("ui_pad", false);
+        boolean sheet = settingsOpen || paksOpen;
+        float kbdAspect = CocoKeyboardView.COLS / 5f;
 
         if (H >= W) {
-            // Portrait: toolbar, picture (4:3), then keyboard / pad / settings.
+            // Portrait: toolbar, picture (4:3), then keyboard / pad / settings / Paks.
             int sdlH = aw * 3 / 4;
             int y = t + tb + sdlH;
             int avail = Math.max(0, H - b - y);
@@ -408,14 +430,22 @@ public class MainActivity extends SDLActivity {
             place(mLayout, l, t + tb, aw, sdlH);
             kbd.setOverlay(false);
             show(toolbar, true);
+            show(tabKeys, false);
+            show(tabJoy, false);
+            keysButton.setVisibility(View.VISIBLE);
+            padButton.setVisibility(View.VISIBLE);
+            show(panel, settingsOpen);
+            show(paksPanel, paksOpen);
             if (settingsOpen) {
                 place(panel, l, y, aw, avail);
-                show(panel, true);
+            } else if (paksOpen) {
+                place(paksPanel, l, y, aw, avail);
+            }
+            if (sheet) {
                 show(kbd, false);
                 show(pad, false);
             } else {
-                show(panel, false);
-                int kh = kv ? Math.min(Math.round(aw * 5 / 13f * 1.1f), avail) : 0;
+                int kh = kv ? Math.min(Math.round(aw / kbdAspect * 1.1f), avail) : 0;
                 place(kbd, l, y, aw, Math.max(kh, 1));
                 show(kbd, kv && kh > 0);
                 int ph = pv ? Math.min(avail - kh, Math.round(aw * 0.5f)) : 0;
@@ -423,32 +453,58 @@ public class MainActivity extends SDLActivity {
                 show(pad, pv && ph > 0);
             }
         } else {
-            // Landscape: the picture fills the screen; everything else floats over it.
+            // Landscape: the picture (4:3) on the left at full height; on the
+            // right the toolbar and a Keyboard / Joystick tab.
             int ah = H - t - b;
-            place(mLayout, l, t, aw, ah);
-            int tw = Math.min(aw, dp(360));
-            place(toolbar, l + aw - tw, t, tw, tb);
+            int picW = Math.min(ah * 4 / 3, Math.max(aw - dp(300), aw / 2));
+            int rw = aw - picW;
+            int rx = l + picW;
+            place(mLayout, l, t, picW, picW * 3 / 4 > ah ? ah : picW * 3 / 4);
+            place(toolbar, rx, t, rw, tb);
             show(toolbar, true);
+            keysButton.setVisibility(View.GONE);
+            padButton.setVisibility(View.GONE);
+            kbd.setOverlay(false);
+            int top = t + tb;
+            int avail = Math.max(0, H - b - top);
+            show(panel, settingsOpen);
+            show(paksPanel, paksOpen);
             if (settingsOpen) {
-                int pw = Math.min(aw * 55 / 100, dp(460));
-                place(panel, l + aw - pw, t, pw, ah);
-                show(panel, true);
+                place(panel, rx, top, rw, avail);
+            } else if (paksOpen) {
+                place(paksPanel, rx, top, rw, avail);
+            }
+            if (sheet) {
+                show(tabKeys, false);
+                show(tabJoy, false);
                 show(kbd, false);
                 show(pad, false);
             } else {
-                show(panel, false);
-                // at most 40% of the screen height, and 70% of its width
-                int kh = Math.round(ah * 0.40f);
-                int kw = Math.min(Math.round(kh * 13f / 5f), aw * 7 / 10);
-                kh = Math.round(kw * 5 / 13f);
-                place(kbd, l + (aw - kw) / 2, H - b - kh, kw, kh);
-                kbd.setOverlay(true);
-                show(kbd, kv);
-                int ph = Math.min(ah / 2, Math.round(aw * 0.3f));
-                place(pad, l, H - b - ph, aw, ph);
-                show(pad, pv);
+                boolean joyTab = "joy".equals(settings.get("ui_tab", "keys"));
+                int th = dp(40);
+                place(tabKeys, rx, top, rw / 2, th);
+                place(tabJoy, rx + rw / 2, top, rw - rw / 2, th);
+                show(tabKeys, true);
+                show(tabJoy, true);
+                int body = Math.max(0, avail - th);
+                int kh = Math.min(body, Math.round(rw / kbdAspect));
+                place(kbd, rx, top + th, rw, Math.max(kh, 1));
+                show(kbd, !joyTab && kh > 0);
+                place(pad, rx, top + th, rw, Math.max(body, 1));
+                show(pad, joyTab);
             }
         }
+    }
+
+    void setLandscapeTab(String tab) {
+        settings.set("ui_tab", tab);
+        if ("joy".equals(tab) && !"kjoy0".equals(settings.get("joy_right", "mjoy0"))
+                && !"kjoy0".equals(settings.get("joy_left", "none"))) {
+            apply("joy_right", "kjoy0");
+            Toast.makeText(this, "Right joystick set to the on-screen pad", Toast.LENGTH_SHORT).show();
+        }
+        applyUiSettings();
+        layoutAll();
     }
 
     @Override
@@ -461,6 +517,7 @@ public class MainActivity extends SDLActivity {
 
     void openSettings() {
         settingsOpen = true;
+        paksOpen = false;
         panel.refresh();
         layoutAll();
     }
@@ -468,6 +525,196 @@ public class MainActivity extends SDLActivity {
     void closeSettings() {
         settingsOpen = false;
         layoutAll();
+    }
+
+    void openPaks() {
+        paksOpen = true;
+        settingsOpen = false;
+        paksPanel.refresh();
+        layoutAll();
+    }
+
+    void closePaks() {
+        paksOpen = false;
+        layoutAll();
+    }
+
+    /* ---------------------------------------------------------------- */
+    /* Paks */
+
+    String currentPakName() {
+        return currentPak;
+    }
+
+    /* Insert a cartridge and start it.  The CoCo is reset first: Disk BASIC
+     * keeps hooks that point into the disk ROM, so swapping the cartridge under
+     * it would crash the machine. */
+    void runPak(String path, String title) {
+        currentPak = title;
+        command(OP_RUN, 0, 0, path);
+        closePaks();
+    }
+
+    void ejectPak() {
+        currentPak = null;
+        sendSet("cart", settings.get("cart", "auto"));
+    }
+
+    void pickPaks() {
+        Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+        i.addCategory(Intent.CATEGORY_OPENABLE);
+        i.setType("*/*");
+        i.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
+        try {
+            startActivityForResult(i, REQ_PAKADD);
+        } catch (Exception e) {
+            Toast.makeText(this, "No file picker available", Toast.LENGTH_LONG).show();
+        }
+    }
+
+    private void addPaks(Intent data) {
+        java.util.List<Uri> uris = new java.util.ArrayList<>();
+        if (data.getClipData() != null) {
+            for (int i = 0; i < data.getClipData().getItemCount(); i++) {
+                uris.add(data.getClipData().getItemAt(i).getUri());
+            }
+        } else if (data.getData() != null) {
+            uris.add(data.getData());
+        }
+        int added = 0;
+        for (Uri u : uris) {
+            String name = displayName(u);
+            if (!PakLibrary.isPakName(name)) {
+                Toast.makeText(this, name + " isn't a .rom or .ccc cartridge image", Toast.LENGTH_LONG).show();
+                continue;
+            }
+            try (InputStream in = getContentResolver().openInputStream(u)) {
+                pakLibraryRef[0].add(in, name);
+                added++;
+            } catch (Exception e) {
+                Log.e(TAG, "can't add " + u, e);
+            }
+        }
+        if (added > 0) {
+            Toast.makeText(this, added + (added == 1 ? " Pak" : " Paks") + " added", Toast.LENGTH_SHORT).show();
+        }
+        if (paksPanel != null) {
+            paksPanel.refresh();
+        }
+    }
+
+    /* ---------------------------------------------------------------- */
+    /* ROM files */
+
+    String romLabel(RomManager.Slot slot) {
+        return roms.label(slot);
+    }
+
+    void pickRom(RomManager.Slot slot) {
+        pickFile(REQ_ROM + slot.ordinal());
+    }
+
+    private void handleRomPick(RomManager.Slot slot, Uri uri) throws Exception {
+        final byte[] data;
+        try (InputStream in = getContentResolver().openInputStream(uri)) {
+            java.io.ByteArrayOutputStream bo = new java.io.ByteArrayOutputStream();
+            byte[] buf = new byte[65536];
+            int n;
+            while ((n = in.read(buf)) > 0 && bo.size() < 2 * 1024 * 1024) {
+                bo.write(buf, 0, n);
+            }
+            data = bo.toByteArray();
+        }
+        final String name = displayName(uri);
+        final RomManager.Identity id = RomManager.identify(data);
+        final RomCatalog.Entry e = id.entry;
+        if (e != null && (e.kind.equals("PAK") || e.kind.equals("GMC"))) {
+            new AlertDialog.Builder(this)
+                    .setTitle("That's a cartridge")
+                    .setMessage(name + " is " + e.desc + ", a Program Pak, not a system ROM.\n\nAdd it to your Paks instead?")
+                    .setPositiveButton("Add to Paks", (d, w) -> {
+                        try {
+                            pakLibraryRef[0].add(new ByteArrayInputStream(data), name);
+                            Toast.makeText(this, "Added to Paks", Toast.LENGTH_SHORT).show();
+                        } catch (Exception ex) {
+                            Toast.makeText(this, "Couldn't add it", Toast.LENGTH_LONG).show();
+                        }
+                    })
+                    .setNegativeButton("Cancel", null)
+                    .show();
+        } else if (e != null && !e.kind.equals(slot.kind)) {
+            final RomManager.Slot right = slotForKind(e.kind);
+            if (right == null) {
+                Toast.makeText(this, name + " is " + e.desc + " and can't be used here", Toast.LENGTH_LONG).show();
+                return;
+            }
+            new AlertDialog.Builder(this)
+                    .setTitle("Wrong ROM?")
+                    .setMessage(name + " is " + e.desc + ".\n\nThat's the " + right.title
+                            + " ROM, not " + slot.title + ". Install it as " + right.title + " instead?")
+                    .setPositiveButton("Install as " + right.title, (d, w) -> installRom(right, data, id))
+                    .setNegativeButton("Cancel", null)
+                    .show();
+        } else if (e == null && slot != RomManager.Slot.SDC) {
+            String size = data.length == 8192 || data.length == 16384 ? "" :
+                    "\n\nIts size (" + data.length + " bytes) isn't what a CoCo ROM is (8192 or 16384), so it may be damaged.";
+            new AlertDialog.Builder(this)
+                    .setTitle("Unrecognized ROM")
+                    .setMessage(name + " isn't one of the ROMs XRoar knows (CRC " + String.format("%08x", id.crc)
+                            + ")." + size + "\n\nInstall it as " + slot.title + " anyway?")
+                    .setPositiveButton("Install anyway", (d, w) -> installRom(slot, data, id))
+                    .setNegativeButton("Cancel", null)
+                    .show();
+        } else {
+            installRom(slot, data, id);
+        }
+    }
+
+    private static RomManager.Slot slotForKind(String kind) {
+        for (RomManager.Slot s : RomManager.Slot.values()) {
+            if (s.kind.equals(kind)) {
+                return s;
+            }
+        }
+        return null;
+    }
+
+    private void installRom(RomManager.Slot slot, byte[] data, RomManager.Identity id) {
+        try {
+            String file = roms.install(slot, data, id);
+            Toast.makeText(this, slot.title + " replaced (" + file + ")", Toast.LENGTH_SHORT).show();
+            rebuildMachine();
+        } catch (Exception ex) {
+            Toast.makeText(this, "Couldn't install the ROM: " + ex.getMessage(), Toast.LENGTH_LONG).show();
+        }
+        if (panel != null) {
+            panel.refresh();
+        }
+    }
+
+    void removeRom(final RomManager.Slot slot) {
+        String what = roms.label(slot);
+        if (what == null) {
+            return;
+        }
+        new AlertDialog.Builder(this)
+                .setTitle("Remove " + slot.title + "?")
+                .setMessage(what + "\n\nThe file is deleted from the roms folder."
+                        + (slot.required ? "\nThe CoCo can't start without it until you add another." : ""))
+                .setPositiveButton("Remove", (d, w) -> {
+                    roms.remove(slot);
+                    rebuildMachine();
+                    if (panel != null) {
+                        panel.refresh();
+                    }
+                })
+                .setNegativeButton("Cancel", null)
+                .show();
+    }
+
+    /* Rebuild the machine so it reads the ROM files again. */
+    private void rebuildMachine() {
+        applyMachineSetting("machine", settings.get("machine", "cocous"));
     }
 
     void setKeyboardVisible(boolean on) {
@@ -488,6 +735,11 @@ public class MainActivity extends SDLActivity {
         layoutAll();
     }
 
+    void setUiString(String key, String value) {
+        settings.set(key, value);
+        applyUiSettings();
+    }
+
     void setUi(String key, boolean on) {
         settings.setBool(key, on);
         applyUiSettings();
@@ -497,6 +749,10 @@ public class MainActivity extends SDLActivity {
     public void onBackPressed() {
         if (settingsOpen) {
             closeSettings();
+            return;
+        }
+        if (paksOpen) {
+            closePaks();
             return;
         }
         long now = SystemClock.uptimeMillis();
@@ -516,12 +772,25 @@ public class MainActivity extends SDLActivity {
         box.setOrientation(LinearLayout.VERTICAL);
         box.setPadding(dp(20), dp(8), dp(20), 0);
         final EditText et = new EditText(this);
-        et.setHint("Text to type into the CoCo");
+        et.setHint("Text to type into the CoCo, or open a text file");
         et.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_MULTI_LINE
                 | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
-        et.setMinLines(3);
+        et.setMinLines(4);
+        et.setMaxLines(8);
         et.setGravity(Gravity.TOP | Gravity.START);
         box.addView(et);
+        Button open = new Button(this);
+        open.setText("Open text file…");
+        open.setAllCaps(false);
+        open.setOnClickListener(v -> pickFile(REQ_TYPEFILE));
+        box.addView(open);
+        final CheckBox program = new CheckBox(this);
+        program.setText("A BASIC program: every line starts with a line number");
+        program.setChecked(true);
+        box.addView(program);
+        final CheckBox skip = new CheckBox(this);
+        skip.setText("Leave out lines with problems");
+        box.addView(skip);
         final CheckBox upper = new CheckBox(this);
         upper.setText("Convert to UPPERCASE (BASIC needs it)");
         upper.setChecked(true);
@@ -530,16 +799,25 @@ public class MainActivity extends SDLActivity {
         enter.setText("Press ENTER at the end");
         enter.setChecked(true);
         box.addView(enter);
+        final TextView info = new TextView(this);
+        info.setTextSize(12);
+        info.setPadding(0, dp(6), 0, dp(6));
+        box.addView(info);
+        android.widget.ScrollView sv = new android.widget.ScrollView(this);
+        sv.addView(box);
 
-        AlertDialog d = new AlertDialog.Builder(this)
+        final AlertDialog d = new AlertDialog.Builder(this)
                 .setTitle("Type text")
-                .setView(box)
+                .setView(sv)
                 .setPositiveButton("Type", (dlg, which) -> {
                     String text = et.getText().toString();
+                    if (program.isChecked()) {
+                        text = BasicText.forTyping(text, true, skip.isChecked());
+                    }
                     if (upper.isChecked()) {
                         text = text.toUpperCase(java.util.Locale.US);
                     }
-                    if (enter.isChecked() && !text.endsWith("\n")) {
+                    if (enter.isChecked() && !text.isEmpty() && !text.endsWith("\n")) {
                         text += "\n";
                     }
                     if (!text.isEmpty()) {
@@ -548,8 +826,74 @@ public class MainActivity extends SDLActivity {
                 })
                 .setNegativeButton("Cancel", null)
                 .create();
+        final Runnable recheck = () -> {
+            String text = et.getText().toString();
+            java.util.List<BasicText.Problem> probs = BasicText.check(text, program.isChecked());
+            boolean errors = BasicText.hasErrors(probs);
+            int n = BasicText.lines(text).size();
+            String msg;
+            if (text.trim().isEmpty()) {
+                msg = "A CoCo line can hold " + BasicText.MAX_LINE_LENGTH + " characters (a longer one is silently cut off).";
+            } else if (probs.isEmpty()) {
+                msg = n + (n == 1 ? " line" : " lines") + ", all fine.";
+            } else {
+                msg = BasicText.summary(probs, 4);
+            }
+            info.setText(msg);
+            info.setTextColor(errors ? 0xFFD93025 : (probs.isEmpty() ? 0xFF188038 : 0xFFB06000));
+            android.widget.Button ok = d.getButton(AlertDialog.BUTTON_POSITIVE);
+            if (ok != null) {
+                ok.setEnabled(!text.isEmpty() && (!errors || skip.isChecked()));
+            }
+        };
+        et.addTextChangedListener(new android.text.TextWatcher() {
+            @Override public void beforeTextChanged(CharSequence s, int a, int b, int c) { }
+            @Override public void onTextChanged(CharSequence s, int a, int b, int c) { }
+            @Override public void afterTextChanged(android.text.Editable e) { recheck.run(); }
+        });
+        program.setOnCheckedChangeListener((v, on) -> recheck.run());
+        skip.setOnCheckedChangeListener((v, on) -> recheck.run());
+        d.setOnDismissListener(x -> {
+            typeBox = null;
+            typeChanged = null;
+        });
+        typeBox = et;
+        typeChanged = recheck;
         d.getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_VISIBLE);
         d.show();
+        recheck.run();
+    }
+
+    private void loadTypeFile(Uri uri) {
+        if (typeBox == null) {
+            return;
+        }
+        try (InputStream in = getContentResolver().openInputStream(uri)) {
+            java.io.ByteArrayOutputStream bo = new java.io.ByteArrayOutputStream();
+            byte[] buf = new byte[65536];
+            int n;
+            while ((n = in.read(buf)) > 0 && bo.size() < 1024 * 1024) {
+                bo.write(buf, 0, n);
+            }
+            typeBox.setText(new String(bo.toByteArray(), "UTF-8"));
+        } catch (Exception e) {
+            Toast.makeText(this, "Couldn't read that file", Toast.LENGTH_LONG).show();
+        }
+    }
+
+    private String displayName(Uri uri) {
+        String name = null;
+        try (Cursor c = getContentResolver().query(uri,
+                new String[] { OpenableColumns.DISPLAY_NAME }, null, null, null)) {
+            if (c != null && c.moveToFirst()) {
+                name = c.getString(0);
+            }
+        } catch (Exception ignored) {
+        }
+        if (name == null || name.isEmpty()) {
+            name = uri.getLastPathSegment();
+        }
+        return name == null || name.isEmpty() ? "file.bin" : name;
     }
 
     /* ---------------------------------------------------------------- */
@@ -569,10 +913,22 @@ public class MainActivity extends SDLActivity {
     @Override
     protected void onActivityResult(int req, int result, Intent data) {
         super.onActivityResult(req, result, data);
-        if (result != RESULT_OK || data == null || data.getData() == null) {
+        if (result != RESULT_OK || data == null || (data.getData() == null && data.getClipData() == null)) {
             return;
         }
         try {
+            if (req == REQ_PAKADD) {
+                addPaks(data);
+                return;
+            }
+            if (req == REQ_TYPEFILE) {
+                loadTypeFile(data.getData());
+                return;
+            }
+            if (req >= REQ_ROM && req < REQ_ROM + RomManager.Slot.values().length) {
+                handleRomPick(RomManager.Slot.values()[req - REQ_ROM], data.getData());
+                return;
+            }
             if (req >= REQ_DISK && req < REQ_DISK + 4) {
                 int drive = req - REQ_DISK;
                 String path = copyToHome(data.getData(), "disks");

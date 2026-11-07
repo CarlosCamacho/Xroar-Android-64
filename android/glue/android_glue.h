@@ -33,6 +33,10 @@ void android_enqueue(int op, int a, int b, const char *s);
 int android_rom_present(const char *const *names);
 extern const char *const android_sdcdos_names[];
 
+/* What android_main.c started with, so live changes to one of cart/sound keep the other. */
+void android_set_initial_carts(const char *cart, const char *sound);
+
 int android_is_disk_image(const char *path);
+int android_is_pak(const char *path);   // .rom or .ccc: a cartridge image
 
 #endif

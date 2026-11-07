@@ -18,12 +18,15 @@ import java.util.List;
  * values of XRoar's dkbd.h), so BREAK, CLEAR, the arrows and SHIFT combinations
  * behave exactly as on the real machine.
  *
- * Layout, 13 columns by 5 rows:
- *   1 2 3 4 5 6 7 8 9 0 : - BRK
- *   Q W E R T Y U I O P @ UP CLR
- *   A S D F G H J K L ;  ENTER
- *   SHIFT Z X C V B N M , . /  DOWN
- *   LEFT  SPACE  RIGHT
+ * Layout follows the real keyboard (14 units wide, 5 rows), each row stepped
+ * in a little further than the one above:
+ *   1 2 3 4 5 6 7 8 9 0 : -  BREAK
+ *   UP Q W E R T Y U I O P @ LEFT RIGHT
+ *   DOWN A S D F G H J K L ; ENTER CLEAR
+ *   SHIFT Z X C V B N M , . / SHIFT
+ *   SPACE
+ * Keys with a second legend (! over 1, and so on) print the SHIFTed one above.
+ * Four keycap styles copy the keyboards the CoCo family shipped with.
  *
  * SHIFT is sticky when enabled: one tap shifts the next key, a quick second
  * tap locks it, and a third tap (or any tap while locked) lets go.  Several
@@ -37,8 +40,21 @@ final class CocoKeyboardView extends View {
 
     static final int D_SHIFT = 0x37;
 
-    private static final int COLS = 13;
+    static final float COLS = 14f;
     private static final int ROWS = 5;
+
+    /* Keycap styles: id, menu name, key face, key legend, body (behind keys), special-key face. */
+    static final String[] STYLE_IDS = { "white", "cream", "hitek", "grey" };
+    static final String[] STYLE_NAMES = {
+        "White (CoCo 2)", "Cream (TRS-80 Color Computer)", "Black (Hi-Tek)", "Grey (TRS-80)" };
+    private static final int[][] STYLES = {
+        // face,      legend,     body,       special face
+        { 0xFFF1F1EC, 0xFF2B2B2B, 0xFFBDBDB6, 0xFFE2E2DC },
+        { 0xFFEDE4C6, 0xFF2E2A22, 0xFF4A4438, 0xFFDCD2B0 },
+        { 0xFF232326, 0xFFEDEDED, 0xFF0B0B0D, 0xFF17171A },
+        { 0xFFB9BBBD, 0xFF161616, 0xFF5E6165, 0xFFA3A6A9 },
+    };
+    private static final int BREAK_FACE = 0xFFC8342B;
     private static final long DOUBLE_TAP_MS = 450;
 
     private static final class Key {
@@ -71,6 +87,7 @@ final class CocoKeyboardView extends View {
     private boolean sticky = true;
     private boolean haptic = true;
     private boolean overlay = false;
+    private int style = 0;
 
     private boolean shiftLatched;
     private boolean shiftLocked;
@@ -81,8 +98,8 @@ final class CocoKeyboardView extends View {
         text.setTextAlign(Paint.Align.CENTER);
         text.setColor(0xFFFFFFFF);
         text.setFakeBoldText(true);
-        legend.setTextAlign(Paint.Align.RIGHT);
-        legend.setColor(0xFFB0B8C0);
+        legend.setTextAlign(Paint.Align.CENTER);
+        legend.setFakeBoldText(true);
         buildKeys();
     }
 
@@ -104,6 +121,16 @@ final class CocoKeyboardView extends View {
         haptic = on;
     }
 
+    void setStyle(String id) {
+        style = 0;
+        for (int i = 0; i < STYLE_IDS.length; i++) {
+            if (STYLE_IDS[i].equals(id)) {
+                style = i;
+            }
+        }
+        invalidate();
+    }
+
     /* Overlay mode (landscape): keys are drawn translucent over the picture. */
     void setOverlay(boolean on) {
         overlay = on;
@@ -117,63 +144,64 @@ final class CocoKeyboardView extends View {
     }
 
     private void buildKeys() {
-        // Row 0: digits, colon, minus, BREAK
+        // Row 0: 1-0 : - then BREAK, stepped in half a key
         String[] digits = { "1", "2", "3", "4", "5", "6", "7", "8", "9", "0" };
-        String[] digitsShift = { "!", "\"", "#", "$", "%", "&", "'", "(", ")", null };
+        String[] digitsShift = { "!", "\"", "#", "$", "%", "&", "'", "(", ")", "Ø" };
         int[] digitCodes = { 1, 2, 3, 4, 5, 6, 7, 8, 9, 0 };
-        float x = 0;
+        float x = 0.5f;
         for (int i = 0; i < 10; i++) {
             add(0, x++, 1, digits[i], digitsShift[i], digitCodes[i]);
         }
         add(0, x++, 1, ":", "*", 0x0a);
         add(0, x++, 1, "-", "=", 0x0d);
-        add(0, x, 1, "BRK", null, 0x32);
+        add(0, x, 1.2f, "BREAK", null, 0x32);
 
-        // Row 1: QWERTYUIOP @ UP CLEAR
-        x = 0;
+        // Row 1: UP Q-P @ LEFT RIGHT
+        add(1, 0, 1, "↑", null, 0x2b);
+        x = 1;
         for (char ch : "QWERTYUIOP".toCharArray()) {
             add(1, x++, 1, String.valueOf(ch), null, 0x11 + (ch - 'A'));
         }
         add(1, x++, 1, "@", null, 0x10);
-        add(1, x++, 1, "↑", null, 0x2b);
-        add(1, x, 1, "CLR", null, 0x31);
+        add(1, x++, 1, "←", null, 0x2d);
+        add(1, x, 1, "→", null, 0x2e);
 
-        // Row 2: ASDFGHJKL ; ENTER
-        x = 0;
+        // Row 2: DOWN A-L ; ENTER CLEAR
+        add(2, 0.25f, 1, "↓", null, 0x2c);
+        x = 1.25f;
         for (char ch : "ASDFGHJKL".toCharArray()) {
             add(2, x++, 1, String.valueOf(ch), null, 0x11 + (ch - 'A'));
         }
         add(2, x++, 1, ";", "+", 0x0b);
-        add(2, x, 3, "ENTER", null, 0x30);
+        add(2, x, 1.6f, "ENTER", null, 0x30);
+        add(2, x + 1.6f, 1.1f, "CLEAR", null, 0x31);
 
-        // Row 3: SHIFT ZXCVBNM , . / DOWN
-        add(3, 0, 2, "SHIFT", null, D_SHIFT);
-        x = 2;
+        // Row 3: SHIFT Z-M , . / SHIFT
+        add(3, 0, 1.5f, "SHIFT", null, D_SHIFT);
+        x = 1.5f;
         for (char ch : "ZXCVBNM".toCharArray()) {
             add(3, x++, 1, String.valueOf(ch), null, 0x11 + (ch - 'A'));
         }
         add(3, x++, 1, ",", "<", 0x0c);
         add(3, x++, 1, ".", ">", 0x0e);
         add(3, x++, 1, "/", "?", 0x0f);
-        add(3, x, 1, "↓", null, 0x2c);
+        add(3, x, 1.5f, "SHIFT", null, D_SHIFT);
 
-        // Row 4: LEFT SPACE RIGHT
-        add(4, 0, 2.5f, "←", null, 0x2d);
-        add(4, 2.5f, 8, "SPACE", null, 0x2f);
-        add(4, 10.5f, 2.5f, "→", null, 0x2e);
+        // Row 4: SPACE
+        add(4, 3f, 8f, "SPACE", null, 0x2f);
     }
 
     @Override
     protected void onSizeChanged(int w, int h, int ow, int oh) {
-        float cw = w / (float) COLS;
+        float cw = w / COLS;
         float ch = h / (float) ROWS;
-        float gap = Math.max(1.5f, Math.min(cw, ch) * 0.06f);
+        float gap = Math.max(1.5f, Math.min(cw, ch) * 0.07f);
         for (Key k : keys) {
-            k.rect.set(k.x * cw + gap, k.row * ch + gap, (k.x + k.w) * cw - gap, (k.row + 1) * ch - gap);
+            k.rect.set(k.x * cw + gap, k.row * ch + gap, (k.x + k.w) * cw - gap, (k.row + 1) * ch - gap * 1.8f);
         }
         float unit = Math.min(cw, ch);
-        text.setTextSize(unit * 0.42f);
-        legend.setTextSize(unit * 0.24f);
+        text.setTextSize(unit * 0.44f);
+        legend.setTextSize(unit * 0.27f);
     }
 
     private boolean shiftActive() {
@@ -187,40 +215,67 @@ final class CocoKeyboardView extends View {
 
     @Override
     protected void onDraw(Canvas c) {
-        c.drawColor(overlay ? 0x66101214 : 0xFF141518);
+        int[] st = STYLES[style];
+        c.drawColor(overlay ? (st[2] & 0x00FFFFFF) | 0xAA000000 : st[2]);
         boolean shifted = shiftActive();
+        int alpha = overlay ? 0xE0000000 : 0xFF000000;
         for (Key k : keys) {
-            int color;
+            boolean isBreak = k.code == 0x32;
+            int face = isBreak ? BREAK_FACE : (k.label.length() > 1 || k.code == 0x2b ? st[3] : st[0]);
+            int ink = isBreak ? 0xFFFFFFFF : st[1];
             if (k.code == D_SHIFT && shiftLocked) {
-                color = 0xFFD29A2D;
+                face = 0xFFE0A030;
             } else if (k.code == D_SHIFT && (shiftLatched || k.down)) {
-                color = 0xFF2D7DD2;
-            } else if (k.down) {
-                color = 0xFF7A828C;
-            } else {
-                boolean special = k.label.length() > 1 || k.code == 0x2b || k.code == 0x2c;
-                color = special ? 0xFF2B2E33 : 0xFF3A3E44;
+                face = 0xFF5B9BE0;
             }
-            fill.setColor(overlay ? (color & 0x00FFFFFF) | 0xCC000000 : color);
-            float r = Math.min(k.rect.width(), k.rect.height()) * 0.14f;
-            c.drawRoundRect(k.rect, r, r, fill);
+            float r = Math.min(k.rect.width(), k.rect.height()) * 0.16f;
+            float lift = k.down ? 0 : k.rect.height() * 0.07f;
+            RectF f = new RectF(k.rect.left, k.rect.top + (k.down ? lift : 0),
+                    k.rect.right, k.rect.bottom - (k.down ? 0 : lift));
+            // the key's side: a darker copy below the face
+            if (!k.down) {
+                fill.setColor((shade(face, 0.62f) & 0x00FFFFFF) | alpha);
+                c.drawRoundRect(new RectF(f.left, f.top + lift, f.right, f.bottom + lift), r, r, fill);
+            }
+            fill.setColor((face & 0x00FFFFFF) | alpha);
+            c.drawRoundRect(f, r, r, fill);
+            // a soft highlight across the top of the cap
+            fill.setColor((shade(face, 1.18f) & 0x00FFFFFF) | (overlay ? 0x90000000 : 0xB0000000));
+            c.drawRoundRect(new RectF(f.left + r * 0.4f, f.top + r * 0.3f, f.right - r * 0.4f,
+                    f.top + f.height() * 0.38f), r * 0.6f, r * 0.6f, fill);
 
+            text.setColor(ink);
+            legend.setColor(ink);
             String label = k.label;
-            if (shifted && k.shifted != null) {
-                label = k.shifted;
-            }
+            String sub = (k.shifted != null) ? k.shifted : null;
             float size = text.getTextSize();
-            if (label.length() > 2) {
-                text.setTextSize(size * 0.55f);
+            if (shifted && sub != null && !k.label.equals("0")) {
+                // SHIFT is down: the shifted symbol is what you'll get; bring it forward
+                label = sub;
+                sub = k.label;
             }
-            float cy = k.rect.centerY() - (text.descent() + text.ascent()) / 2f;
-            c.drawText(label, k.rect.centerX(), cy, text);
+            if (label.length() > 2) {
+                text.setTextSize(Math.min(size * 0.55f, f.width() / label.length() * 1.1f));
+            }
+            boolean two = sub != null;
+            float cy = (two ? f.top + f.height() * 0.68f : f.centerY())
+                    - (text.descent() + text.ascent()) / 2f;
+            c.drawText(label, f.centerX(), cy, text);
             text.setTextSize(size);
-            if (!shifted && k.shifted != null) {
-                c.drawText(k.shifted, k.rect.right - k.rect.width() * 0.08f,
-                        k.rect.top + legend.getTextSize() * 1.05f, legend);
+            if (two) {
+                legend.setTextAlign(Paint.Align.CENTER);
+                legend.setAlpha(shifted ? 0x70 : 0xFF);
+                c.drawText(sub, f.centerX(), f.top + f.height() * 0.36f, legend);
+                legend.setAlpha(0xFF);
             }
         }
+    }
+
+    private static int shade(int color, float m) {
+        int r = Math.min(255, Math.round(((color >> 16) & 255) * m));
+        int g = Math.min(255, Math.round(((color >> 8) & 255) * m));
+        int b = Math.min(255, Math.round((color & 255) * m));
+        return 0xFF000000 | (r << 16) | (g << 8) | b;
     }
 
     /* ---------------------------------------------------------------- */

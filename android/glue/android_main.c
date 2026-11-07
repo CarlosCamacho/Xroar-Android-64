@@ -185,6 +185,7 @@ int SDL_main(int argc, char **argv) {
 		}
 		mkdir("roms", 0777);
 		mkdir("disks", 0777);
+		mkdir("paks", 0777);
 		char path[1024];
 		snprintf(path, sizeof(path), "%s/xroar-log.txt", dir);
 		if (!freopen(path, "w", stderr)) {
@@ -240,7 +241,23 @@ int SDL_main(int argc, char **argv) {
 	int user_cart = conf_has("machine-cart", NULL, 0);
 	fprintf(stderr, "android: machine '%s', cart setting '%s', sdcdos.rom %s, machine-cart in xroar.conf: %s\n",
 		machine, cart, sdcdos ? "found" : "not found", user_cart ? "yes" : "no");
-	if (strcmp(cart, "auto") == 0) {
+	// Sound cartridge: with one chosen, everything goes in a Multi-Pak, the
+	// sound cartridge in slot 1 and the disk cartridge in slot 4 (which the
+	// Multi-Pak selects at power-up), as software for them expects.
+	char sound[32] = "none";
+	setting("sound", sound, sizeof(sound));
+	android_set_initial_carts(cart, sound);
+	if (strcmp(sound, "none") != 0) {
+		const char *disk = strcmp(cart, "auto") == 0 ? (sdcdos ? "cocosdc" : "rsdos") : cart;
+		add(args, &n, "-cart", "mpi");
+		if (strcmp(disk, "none") != 0) {
+			snprintf(v, sizeof(v), "3=%s", disk);
+			add(args, &n, "-mpi-load-cart", v);
+		}
+		snprintf(v, sizeof(v), "0=%s", sound);
+		add(args, &n, "-mpi-load-cart", v);
+		add(args, &n, "-mpi-slot", strcmp(disk, "none") != 0 ? "3" : "0");
+	} else if (strcmp(cart, "auto") == 0) {
 		if (sdcdos && !user_cart) {
 			add(args, &n, "-cart", "cocosdc");
 		}
@@ -248,6 +265,16 @@ int SDL_main(int argc, char **argv) {
 		add(args, &n, "-no-cart", NULL);
 	} else {
 		add(args, &n, "-cart", cart);
+	}
+
+	// Picture defaults: "zoomed" shows just the CoCo's 256x192 screen, so it
+	// fills the phone's width at a true 4:3, and 60 Hz scaling off keeps all 16
+	// rows (with it on, a sixth of the screen is cut off or stretched).
+	if (!setting("picture", v, sizeof(v))) {
+		add(args, &n, "-vo-picture", "zoomed");
+	}
+	if (!setting("ntsc_scaling", v, sizeof(v))) {
+		add(args, &n, "-no-vo-scale-60hz", NULL);
 	}
 
 	for (unsigned i = 0; i < sizeof(option_map) / sizeof(option_map[0]); i++) {

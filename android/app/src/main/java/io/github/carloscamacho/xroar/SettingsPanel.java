@@ -290,28 +290,31 @@ final class SettingsPanel extends LinearLayout {
                 s.get("cart", "auto"), v -> host.apply("cart", v))));
         content.addView(note("Automatic uses the CoCoSDC when roms/sdcdos.rom is present, "
                 + "otherwise the disk controller. Changing these restarts the emulated CoCo."));
+        content.addView(labeled("Sound cartridge", spinner(
+                new String[] { "None", "Games Master Cartridge", "CoCoXSID (SID chip)" },
+                new String[] { "none", "gmc", "cocoxsid" },
+                s.get("sound", "none"), v -> host.apply("sound", v))));
+        content.addView(note("Sound cartridges share the Multi-Pak with the disk controller. Only one at a time. "
+                + "CoCoXSID is the SID chip board (registers at $FF40); the Games Master Cartridge adds "
+                + "a sound chip and also runs GMC games."));
         content.addView(buttonRow(
                 actionButton("Soft reset", () -> host.command(MainActivity.OP_SOFT_RESET, 0, 0, null)),
                 actionButton("Hard reset", () -> host.command(MainActivity.OP_HARD_RESET, 0, 0, null))));
 
         content.addView(heading("ROM FILES"));
-        String[][] roms = {
-            { "Color BASIC", "bas13", "bas12", "bas11", "bas10" },
-            { "Extended BASIC", "extbas11", "extbas10" },
-            { "Disk controller", "disk11", "disk10" },
-            { "SDC-DOS (CoCoSDC)", "sdcdos", "sdc-dos", "sdc_dos" },
-        };
-        for (String[] r : roms) {
-            String found = host.findRom(r);
-            boolean optional = r[0].startsWith("SDC");
-            if (found != null) {
-                content.addView(line(r[0] + ":  " + found, 0xFF81C995));
-            } else {
-                content.addView(line(r[0] + ":  " + (optional ? "not present (optional)" : "MISSING")
-                        + "  (" + r[1] + ".rom)", optional ? DIM : 0xFFF28B82));
-            }
+        for (final RomManager.Slot slot : RomManager.Slot.values()) {
+            String label = host.romLabel(slot);
+            boolean missing = label == null;
+            content.addView(line(slot.title, TEXT));
+            content.addView(line(missing ? (slot.required ? "MISSING" : "not present (optional)") : label,
+                    missing ? (slot.required ? 0xFFF28B82 : DIM) : 0xFF81C995));
+            content.addView(buttonRow(
+                    actionButton(missing ? "Add…" : "Replace…", () -> host.pickRom(slot)),
+                    actionButton("Remove", () -> host.removeRom(slot))));
         }
-        content.addView(note("Put ROM images in " + host.homeDir().getPath() + "/roms/ and restart the app."));
+        content.addView(note("Pick a ROM file from your phone. The app recognizes it by its checksum, "
+                + "names it correctly, and restarts the CoCo with it. Files go in "
+                + host.homeDir().getPath() + "/roms/."));
     }
 
     private void buildVideo() {
@@ -328,11 +331,11 @@ final class SettingsPanel extends LinearLayout {
                 new String[] { "auto", "none", "simple", "5bit", "partial", "simulated" },
                 s.get("ccr", "auto"), v -> host.apply("ccr", v))));
         content.addView(labeled("Picture size", spinner(
-                new String[] { "Automatic", "Zoomed", "Title", "Action", "Underscan" },
-                new String[] { "auto", "zoomed", "title", "action", "underscan" },
-                s.get("picture", "auto"), v -> host.apply("picture", v))));
+                new String[] { "Zoomed (fills the width)", "Automatic (with border)", "Title", "Action", "Underscan" },
+                new String[] { "zoomed", "auto", "title", "action", "underscan" },
+                s.get("picture", "zoomed"), v -> host.apply("picture", v))));
         content.addView(labeled("Scaling", spinner(
-                new String[] { "Automatic", "Sharp (nearest)", "Smooth (linear)" },
+                new String[] { "Sharp bilinear (best)", "Hard pixels (nearest)", "Smooth (linear)" },
                 new String[] { "auto", "nearest", "linear" },
                 s.get("gl_filter", "auto"), v -> host.apply("gl_filter", v))));
 
@@ -393,8 +396,10 @@ final class SettingsPanel extends LinearLayout {
         content.addView(check("Sticky SHIFT (tap once for one key, twice to lock)", s.getBool("ui_sticky", true),
                 b -> host.setUi("ui_sticky", b)));
         content.addView(check("Vibrate on key press", s.getBool("ui_haptic", true), b -> host.setUi("ui_haptic", b)));
+        content.addView(labeled("Keyboard style", spinner(CocoKeyboardView.STYLE_NAMES, CocoKeyboardView.STYLE_IDS,
+                s.get("ui_kbd_style", "white"), v -> host.setUiString("ui_kbd_style", v))));
         content.addView(buttonRow(actionButton("Type text…", () -> host.showTypeDialog())));
-        content.addView(note("\"Type text\" uses your phone's own keyboard and types the text into the CoCo, "
+        content.addView(note("\"Type text\" uses your phone's own keyboard, or a text file, and types it into the CoCo, "
                 + "so you can paste programs. A Bluetooth keyboard also works."));
     }
 

@@ -240,6 +240,13 @@ int android_is_disk_image(const char *path) {
 	    || !strcasecmp(dot, ".os9") || !strcasecmp(dot, ".dmk");
 }
 
+int android_is_pak(const char *path) {
+	const char *dot = strrchr(path, '.');
+	return dot && (!strcasecmp(dot, ".rom") || !strcasecmp(dot, ".ccc"));
+}
+
+static const char *base_name(const char *path);
+
 static int copy_file(const char *src, const char *dst) {
 	FILE *in = fopen(src, "rb");
 	if (!in) return -1;
@@ -329,6 +336,13 @@ static void open_file(const char *path, int autorun) {
 	say("%s %s", autorun ? "Running" : "Loading", base_name(path));
 	if (android_is_disk_image(path)) {
 		insert_disk(0, path, autorun);
+	} else if (android_is_pak(path)) {
+		// A cartridge replaces whatever is in the slot, and Disk BASIC's hooks
+		// still point into the old ROM, so the machine has to be reset, and a
+		// Pak is made to start itself at power-up.  Like putting one in a real
+		// CoCo, this always starts it (Load and Run are the same for a Pak).
+		say("Cartridge: %s", base_name(path));
+		xroar_load_file_by_type(path, 1);
 	} else {
 		xroar_load_file_by_type(path, autorun);
 	}
@@ -387,6 +401,52 @@ static const char *resolve_cart(const char *v) {
 	return v;
 }
 
+/* The cartridge setup is two settings: "cart" (the disk cartridge: auto, rsdos,
+ * cocosdc, none) and "sound" (none, gmc, cocoxsid).  With a sound cartridge
+ * everything is put in a Multi-Pak: sound in slot 1, disk in slot 4. */
+static char cur_cart[32] = "auto";
+static char cur_sound[32] = "none";
+
+void android_set_initial_carts(const char *cart, const char *sound) {
+	snprintf(cur_cart, sizeof(cur_cart), "%s", cart);
+	snprintf(cur_sound, sizeof(cur_sound), "%s", sound);
+}
+
+static void apply_carts(void) {
+	const char *disk = resolve_cart(cur_cart);
+	int has_disk = strcmp(disk, "none") != 0;
+	struct cart_config *cc = NULL;
+	if (strcmp(cur_sound, "none") == 0) {
+		cc = has_disk ? cart_config_by_name(disk) : NULL;
+	} else {
+		cc = cart_config_by_name("android-mpi");
+		if (!cc) {
+			cc = cart_config_new();
+			cc->name = strdup("android-mpi");
+			cc->description = strdup("Multi-Pak (sound and disk)");
+			cc->type = strdup("mpi");
+		}
+		for (int i = 0; i < 4; i++) {
+			free(cc->mpi.slot_cart_name[i]);
+			cc->mpi.slot_cart_name[i] = NULL;
+		}
+		cc->mpi.slot_cart_name[0] = strdup(cur_sound);
+		if (has_disk) {
+			cc->mpi.slot_cart_name[3] = strdup(disk);
+		}
+		cc->mpi.initial_slot = has_disk ? 3 : 0;
+	}
+	char what[96];
+	if (strcmp(cur_sound, "none") != 0) {
+		snprintf(what, sizeof(what), "Multi-Pak with %s%s", cur_sound, has_disk ? " and disk" : "");
+	} else {
+		snprintf(what, sizeof(what), "%s", has_disk ? disk : "none");
+	}
+	say("Cartridge: %s", what);
+	ui_update_state(-1, ui_tag_cartridge, cc ? cc->id : 0, NULL);
+	xroar_hard_reset();
+}
+
 static void apply_setting(char *kv) {
 	char *eq = strchr(kv, '=');
 	if (!eq) {
@@ -415,10 +475,11 @@ static void apply_setting(char *kv) {
 			ui_update_state(-1, ui_tag_machine, mc->id, NULL);
 		}
 	} else if (strcmp(k, "cart") == 0) {
-		const char *name = resolve_cart(v);
-		struct cart_config *cc = strcmp(name, "none") ? cart_config_by_name(name) : NULL;
-		ui_update_state(-1, ui_tag_cartridge, cc ? cc->id : 0, NULL);
-		xroar_hard_reset();
+		snprintf(cur_cart, sizeof(cur_cart), "%s", v);
+		apply_carts();
+	} else if (strcmp(k, "sound") == 0) {
+		snprintf(cur_sound, sizeof(cur_sound), "%s", v);
+		apply_carts();
 	} else if (strcmp(k, "tv_input") == 0) {
 		if (enum_lookup(machine_tv_input_list, v, &val))
 			ui_update_state(-1, ui_tag_tv_input, val, NULL);
@@ -511,6 +572,47 @@ static void check_display(void) {
 	}
 }
 
+/* Test aid: with XROAR_DUMP_FRAME=<file.ppm> in the environment, write what
+ * the renderer shows (as the phone would) to a PPM a few seconds after the
+ * first frame, then carry on.  Used by tools/hosttest to look at the picture
+ * and measure it; it does nothing in the app. */
+static void maybe_dump_frame(void) {
+	static int done;
+	static Uint32 start;
+	const char *path = getenv("XROAR_DUMP_FRAME");
+	if (!path || done || !global_uisdl2 || !global_uisdl2->vo_window) {
+		return;
+	}
+	if (!start) {
+		start = SDL_GetTicks();
+		return;
+	}
+	const char *delay = getenv("XROAR_DUMP_DELAY_MS");
+	if (SDL_GetTicks() - start < (Uint32)(delay ? atoi(delay) : 4000)) {
+		return;
+	}
+	done = 1;
+	SDL_Renderer *r = SDL_GetRenderer(global_uisdl2->vo_window);
+	int w = 0, h = 0;
+	if (!r || SDL_GetRendererOutputSize(r, &w, &h) != 0 || w <= 0 || h <= 0) {
+		return;
+	}
+	uint8_t *px = malloc((size_t)w * h * 4);
+	if (!px) {
+		return;
+	}
+	if (SDL_RenderReadPixels(r, NULL, SDL_PIXELFORMAT_RGB24, px, w * 3) == 0) {
+		FILE *f = fopen(path, "wb");
+		if (f) {
+			fprintf(f, "P6\n%d %d\n255\n", w, h);
+			fwrite(px, 3, (size_t)w * h, f);
+			fclose(f);
+			fprintf(stderr, "android: frame %dx%d written to %s\n", w, h, path);
+		}
+	}
+	free(px);
+}
+
 void android_xroar_run(int ncycles) {
 	struct cmd *c;
 	while ((c = dequeue()) != NULL) {
@@ -520,5 +622,6 @@ void android_xroar_run(int ncycles) {
 	}
 	service_key_releases();
 	check_display();
+	maybe_dump_frame();
 	xroar_run(ncycles);
 }

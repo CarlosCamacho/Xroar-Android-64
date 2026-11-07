@@ -1,0 +1,840 @@
+From 4008a8d84896c1b22a8a523ee0524bb4ae3bfcf9 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sat, 7 Nov 2026 20:09:42 +0000
+Subject: [PATCH] CoCoXSID: an emulated SID sound cartridge
+
+New cart type 'cocoxsid': SID register n at $FF40+n (the SCS window, so it
+sits in a Multi-Pak slot selected through $FF7F), driven by src/sid.c, a
+compact 6581 emulation: three voices with triangle/saw/pulse/noise and ANDed
+combinations, ADSR envelopes, ring modulation, hard sync, the state-variable
+filter, and OSC3/ENV3 readback.  The chip runs at an assumed 1.000 MHz clock
+(the published player's pitch table is tuned to it).  Its audio goes through
+the sound interface's non-muxed (external) input, like the real board's Ext
+jack.
+
+tools/sid_test.c checks the core against the data sheet: pitch, pulse width,
+attack times, sustain, release, volume, filters, sync, readable registers.
+---
+ src/Makefile.am  |   2 +
+ src/cocoxsid.c   | 183 +++++++++++++++++++++++++++++++++
+ src/part.c       |   2 +
+ src/sid.c        | 260 +++++++++++++++++++++++++++++++++++++++++++++++
+ src/sid.h        |  73 +++++++++++++
+ src/xroar.c      |   4 +
+ tools/sid_test.c | 219 +++++++++++++++++++++++++++++++++++++++
+ 7 files changed, 743 insertions(+)
+ create mode 100644 src/cocoxsid.c
+ create mode 100644 src/sid.c
+ create mode 100644 src/sid.h
+ create mode 100644 tools/sid_test.c
+
+diff --git a/src/Makefile.am b/src/Makefile.am
+index 3690b694..520e53f8 100644
+--- a/src/Makefile.am
++++ b/src/Makefile.am
+@@ -139,6 +139,8 @@ xroar_SOURCES += \
+ 	spi65.c spi65.h \
+ 	spi_sdcard.c \
+ 	cocosdc.c cocosdc.h cocosdc_hw.h \
++	cocoxsid.c \
++	sid.c sid.h \
+ 	cocosdc_fs.c cocosdc_fs.h \
+ 	cocosdc_fdc.c cocosdc_fdc.h \
+ 	wd279x.c wd279x.h
+diff --git a/src/cocoxsid.c b/src/cocoxsid.c
+new file mode 100644
+index 00000000..06adbb49
+--- /dev/null
++++ b/src/cocoxsid.c
+@@ -0,0 +1,183 @@
++/* CoCoXSID cartridge: an emulated MOS 6581 SID sound chip.
++ *
++ * Copyright 2026
++ *
++ * This file is part of XRoar, a Dragon/Tandy CoCo emulator.
++ *
++ * XRoar is free software; you can redistribute it and/or modify it under the
++ * terms of the GNU General Public License as published by the Free Software
++ * Foundation, either version 3 of the License, or (at your option) any later
++ * version.
++ *
++ * See COPYING.GPL for redistribution conditions.
++ */
++
++/* SID register n is at $FF40 + n: the cartridge answers in the whole SCS
++ * window, which it shares with the disk controller, so it normally lives in a
++ * Multi-Pak slot selected by $FF7F (slot 1 by convention).  The chip runs at an
++ * assumed 1.000 MHz clock (the published player's pitch table is tuned to it;
++ * the real board's clock is not documented).
++ *
++ * The real cartridge has a switch sending its audio either to the SND pin or
++ * to an external jack.  Here the audio is mixed straight to the output, like
++ * the external jack.
++ */
++
++#include "top-config.h"
++
++#include <assert.h>
++#include <stdint.h>
++#include <stdlib.h>
++#include <string.h>
++
++#include "array.h"
++#include "cart.h"
++#include "logging.h"
++#include "part.h"
++#include "serialise.h"
++#include "sid.h"
++#include "sound.h"
++
++#define SID_CLOCK_HZ 1000000
++
++struct cocoxsid {
++	struct cart cart;
++	struct sid sid;
++	struct sound_interface *snd;
++};
++
++static const struct ser_struct ser_struct_cocoxsid[] = {
++	SER_ID_STRUCT_NEST(1, &cart_ser_struct_data),
++};
++
++static const struct ser_struct_data cocoxsid_ser_struct_data = {
++	.elems = ser_struct_cocoxsid,
++	.num_elems = ARRAY_N_ELEMENTS(ser_struct_cocoxsid),
++};
++
++// - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
++
++static uint8_t cocoxsid_read(struct cart *c, uint16_t A, bool P2, bool R2, uint8_t D);
++static uint8_t cocoxsid_write(struct cart *c, uint16_t A, bool P2, bool R2, uint8_t D);
++static void cocoxsid_reset(struct cart *c, bool hard);
++static void cocoxsid_attach(struct cart *c);
++static void cocoxsid_detach(struct cart *c);
++static bool cocoxsid_has_interface(struct cart *c, const char *ifname);
++static void cocoxsid_attach_interface(struct cart *c, const char *ifname, void *intf);
++static float cocoxsid_get_audio(void *sptr, uint32_t tick, int nframes, float *buf);
++
++// - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
++
++static struct part *cocoxsid_allocate(void);
++static void cocoxsid_initialise(struct part *p, void *options);
++static bool cocoxsid_finish(struct part *p);
++
++static const struct partdb_entry_funcs cocoxsid_funcs = {
++	.allocate = cocoxsid_allocate,
++	.initialise = cocoxsid_initialise,
++	.finish = cocoxsid_finish,
++	.free = cart_rom_free,
++
++	.ser_struct_data = &cocoxsid_ser_struct_data,
++
++	.is_a = dragon_cart_is_a,
++};
++
++const struct cart_partdb_entry cocoxsid_part = { .partdb_entry = { .name = "cocoxsid", .description = "Sheldon MacDonald / Brendan Donahe | CoCoXSID (SID sound)", .funcs = &cocoxsid_funcs } };
++
++static struct part *cocoxsid_allocate(void) {
++	struct cocoxsid *x = part_new(sizeof(*x));
++	struct cart *c = &x->cart;
++	struct part *p = &c->part;
++
++	*x = (struct cocoxsid){0};
++
++	cart_rom_init(c);
++	c->read = cocoxsid_read;
++	c->write = cocoxsid_write;
++	c->reset = cocoxsid_reset;
++	c->attach = cocoxsid_attach;
++	c->detach = cocoxsid_detach;
++	c->has_interface = cocoxsid_has_interface;
++	c->attach_interface = cocoxsid_attach_interface;
++
++	sid_init(&x->sid, SID_CLOCK_HZ, 48000);
++	return p;
++}
++
++static void cocoxsid_initialise(struct part *p, void *options) {
++	cart_rom_initialise(p, options);
++}
++
++static bool cocoxsid_finish(struct part *p) {
++	return cart_rom_finish(p);
++}
++
++// - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
++
++static void cocoxsid_reset(struct cart *c, bool hard) {
++	struct cocoxsid *x = (struct cocoxsid *)c;
++	cart_rom_reset(c, hard);
++	if (hard) {
++		sid_reset(&x->sid);
++	}
++}
++
++static void cocoxsid_attach(struct cart *c) {
++	cart_rom_attach(c);
++}
++
++static void cocoxsid_detach(struct cart *c) {
++	struct cocoxsid *x = (struct cocoxsid *)c;
++	LOG_MOD_DEBUG(1, "cocoxsid", "%lu audio frames, peak level %.3f\n", x->sid.frames, (double)x->sid.peak);
++	if (x->snd) {
++		x->snd->get_non_muxed_audio.func = NULL;
++	}
++	cart_rom_detach(c);
++}
++
++static bool cocoxsid_has_interface(struct cart *c, const char *ifname) {
++	return c && (0 == strcmp(ifname, "sound"));
++}
++
++static void cocoxsid_attach_interface(struct cart *c, const char *ifname, void *intf) {
++	if (!c || (0 != strcmp(ifname, "sound"))) {
++		return;
++	}
++	struct cocoxsid *x = (struct cocoxsid *)c;
++	x->snd = intf;
++	sid_init(&x->sid, SID_CLOCK_HZ, x->snd->framerate > 0 ? (unsigned)x->snd->framerate : 48000);
++	x->snd->get_non_muxed_audio = DELEGATE_AS3(float, uint32, int, floatp, cocoxsid_get_audio, x);
++}
++
++// Called for every stretch of emulated time: advance the chip and give the
++// mixer its samples.
++
++static float cocoxsid_get_audio(void *sptr, uint32_t tick, int nframes, float *buf) {
++	struct cocoxsid *x = sptr;
++	(void)tick;
++	sid_render(&x->sid, buf, nframes);
++	return 0.0f;
++}
++
++// - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
++
++// SID register n is at $FF40 + n; the cart is only asked when SCS is active.
++
++static uint8_t cocoxsid_read(struct cart *c, uint16_t A, bool P2, bool R2, uint8_t D) {
++	struct cocoxsid *x = (struct cocoxsid *)c;
++	(void)R2;
++	if (P2) {
++		return sid_read(&x->sid, A & 0x1f);
++	}
++	return D;
++}
++
++static uint8_t cocoxsid_write(struct cart *c, uint16_t A, bool P2, bool R2, uint8_t D) {
++	struct cocoxsid *x = (struct cocoxsid *)c;
++	(void)R2;
++	if (P2) {
++		sid_write(&x->sid, A & 0x1f, D);
++	}
++	return D;
++}
+diff --git a/src/part.c b/src/part.c
+index 897242a8..79ea7dc5 100644
+--- a/src/part.c
++++ b/src/part.c
+@@ -48,6 +48,7 @@ extern const struct cart_partdb_entry cart_rom_part;
+ extern const struct cart_partdb_entry gmc_part;
+ extern const struct cart_partdb_entry idecart_part;
+ extern const struct cart_partdb_entry cocosdc_part;
++extern const struct cart_partdb_entry cocoxsid_part;
+ extern const struct cart_partdb_entry ikon_part;
+ extern const struct cart_partdb_entry mooh_part;
+ extern const struct cart_partdb_entry mpi_part;
+@@ -108,6 +109,7 @@ const struct partdb_entry *partdb[] = {
+ 	(const struct partdb_entry *)&idecart_part,
+ #ifndef HAVE_WASM
+ 	(const struct partdb_entry *)&cocosdc_part,
++	(const struct partdb_entry *)&cocoxsid_part,
+ #ifdef WANT_EXPERIMENTAL
+ 	(const struct partdb_entry *)&ikon_part,
+ #endif
+diff --git a/src/sid.c b/src/sid.c
+new file mode 100644
+index 00000000..1bf18ffd
+--- /dev/null
++++ b/src/sid.c
+@@ -0,0 +1,260 @@
++/* MOS 6581 "SID" sound chip.  See sid.h.
++ *
++ * Copyright 2026
++ *
++ * This file is part of XRoar, a Dragon/Tandy CoCo emulator.
++ * GPL-3.0-or-later; see COPYING.GPL.
++ */
++
++#include "top-config.h"
++
++#include <math.h>
++#include <string.h>
++
++#include "sid.h"
++
++enum { CTRL_GATE = 1, CTRL_SYNC = 2, CTRL_RING = 4, CTRL_TEST = 8,
++       CTRL_TRI = 0x10, CTRL_SAW = 0x20, CTRL_PULSE = 0x40, CTRL_NOISE = 0x80 };
++enum { ENV_ATTACK, ENV_DECAY, ENV_RELEASE };
++
++// Clock cycles per envelope step, for nibble values 0-15 (data sheet times:
++// attack 2 ms .. 8 s at 1 MHz).
++static const uint16_t rate_periods[16] = {
++	9, 32, 63, 95, 149, 220, 267, 313, 392, 977, 1954, 3126, 3907, 11720, 19532, 31251
++};
++
++// Decay and release are exponential: the envelope steps only every
++// exp_period-th rate tick, with a longer period as the level falls.
++static unsigned exp_period_for(unsigned env) {
++	if (env == 0xff) return 1;
++	if (env > 93) return 1;
++	if (env > 54) return 2;
++	if (env > 26) return 4;
++	if (env > 14) return 8;
++	if (env > 6) return 16;
++	if (env > 0) return 30;
++	return 1;
++}
++
++void sid_init(struct sid *s, unsigned clock_hz, unsigned sample_rate) {
++	memset(s, 0, sizeof(*s));
++	s->clock_hz = clock_hz;
++	s->sample_rate = sample_rate;
++	sid_reset(s);
++}
++
++void sid_reset(struct sid *s) {
++	for (int i = 0; i < 3; i++) {
++		struct sid_voice *v = &s->v[i];
++		memset(v, 0, sizeof(*v));
++		v->lfsr = 0x7fffff;
++		v->state = ENV_RELEASE;
++		v->rate_period = rate_periods[0];
++		v->exp_period = 1;
++		v->hold_zero = 1;
++	}
++	s->cutoff_lo = s->cutoff_hi = s->res_filt = s->mode_vol = 0;
++	s->lp = s->bp = 0.0f;
++	s->cycle_error = 0;
++}
++
++static void gate_change(struct sid_voice *v, int gate) {
++	if (gate && !v->gate) {
++		v->state = ENV_ATTACK;
++		v->rate_period = rate_periods[v->ad >> 4];
++		v->hold_zero = 0;
++	} else if (!gate && v->gate) {
++		v->state = ENV_RELEASE;
++		v->rate_period = rate_periods[v->sr & 15];
++	}
++	v->gate = gate;
++}
++
++void sid_write(struct sid *s, unsigned reg, uint8_t d) {
++	reg &= 0x1f;
++	if (reg < 0x15) {
++		struct sid_voice *v = &s->v[reg / 7];
++		switch (reg % 7) {
++		case 0: v->freq = (v->freq & 0xff00) | d; break;
++		case 1: v->freq = (v->freq & 0x00ff) | (d << 8); break;
++		case 2: v->pw = (v->pw & 0x0f00) | d; break;
++		case 3: v->pw = (v->pw & 0x00ff) | ((d & 0x0f) << 8); break;
++		case 4:
++			v->ctrl = d;
++			gate_change(v, d & CTRL_GATE);
++			break;
++		case 5:
++			v->ad = d;
++			if (v->state == ENV_ATTACK) v->rate_period = rate_periods[d >> 4];
++			break;
++		case 6:
++			v->sr = d;
++			if (v->state == ENV_RELEASE) v->rate_period = rate_periods[d & 15];
++			break;
++		}
++		return;
++	}
++	switch (reg) {
++	case 0x15: s->cutoff_lo = d & 7; break;
++	case 0x16: s->cutoff_hi = d; break;
++	case 0x17: s->res_filt = d; break;
++	case 0x18: s->mode_vol = d; break;
++	default: break;
++	}
++}
++
++// 12-bit waveform output for a voice, 0 if no waveform is selected.
++static unsigned wave(const struct sid *s, int i) {
++	const struct sid_voice *v = &s->v[i];
++	const struct sid_voice *src = &s->v[(i + 2) % 3];  // ring/sync source
++	unsigned sel = v->ctrl & 0xf0;
++	if (!sel) return 0;
++	unsigned out = 0xfff;
++	if (sel & CTRL_TRI) {
++		unsigned x = (v->acc >> 11) & 0xfff;
++		unsigned msb = (v->acc >> 23) & 1;
++		if (v->ctrl & CTRL_RING) msb ^= (src->acc >> 23) & 1;
++		if (msb) x ^= 0xfff;
++		out &= x;
++	}
++	if (sel & CTRL_SAW) {
++		out &= (v->acc >> 12) & 0xfff;
++	}
++	if (sel & CTRL_PULSE) {
++		// duty cycle is PW/4096, as in the data sheet
++		out &= (((v->acc >> 12) & 0xfff) < v->pw || (v->ctrl & CTRL_TEST)) ? 0xfff : 0;
++	}
++	if (sel & CTRL_NOISE) {
++		uint32_t l = v->lfsr;
++		unsigned n = ((l >> 22) & 1) << 11 | ((l >> 20) & 1) << 10 | ((l >> 16) & 1) << 9 |
++		             ((l >> 13) & 1) << 8 | ((l >> 11) & 1) << 7 | ((l >> 7) & 1) << 6 |
++		             ((l >> 4) & 1) << 5 | ((l >> 2) & 1) << 4;
++		out &= n;
++	}
++	return out;
++}
++
++uint8_t sid_read(struct sid *s, unsigned reg) {
++	switch (reg & 0x1f) {
++	case 0x19:
++	case 0x1a: return 0xff;
++	case 0x1b: return (uint8_t)(wave(s, 2) >> 4);
++	case 0x1c: return s->v[2].env;
++	default: return 0;
++	}
++}
++
++static void envelope_cycle(struct sid_voice *v) {
++	if (++v->rate_counter < v->rate_period) return;
++	v->rate_counter = 0;
++	if (v->state != ENV_ATTACK && ++v->exp_counter < v->exp_period) return;
++	v->exp_counter = 0;
++	if (v->hold_zero) return;
++	switch (v->state) {
++	case ENV_ATTACK:
++		if (++v->env == 0xff) {
++			v->state = ENV_DECAY;
++			v->rate_period = rate_periods[v->ad & 15];
++		}
++		break;
++	case ENV_DECAY:
++		if (v->env != (unsigned)(v->sr >> 4) * 17 && v->env > 0) {
++			if (v->env > (unsigned)(v->sr >> 4) * 17) --v->env;
++		}
++		break;
++	case ENV_RELEASE:
++		if (v->env > 0) --v->env;
++		break;
++	}
++	v->exp_period = exp_period_for(v->env);
++	if (v->env == 0 && v->state != ENV_ATTACK) v->hold_zero = 1;
++}
++
++// One chip clock cycle for all three voices.
++static void cycle(struct sid *s) {
++	for (int i = 0; i < 3; i++) {
++		struct sid_voice *v = &s->v[i];
++		v->msb_rise = 0;
++		if (v->ctrl & CTRL_TEST) {
++			v->acc = 0;
++			v->lfsr = 0x7fffff;
++		} else {
++			uint32_t old = v->acc;
++			v->acc = (old + v->freq) & 0xffffff;
++			if (!(old & 0x800000) && (v->acc & 0x800000)) v->msb_rise = 1;
++			if (!(old & 0x80000) && (v->acc & 0x80000)) {
++				unsigned bit = ((v->lfsr >> 22) ^ (v->lfsr >> 17)) & 1;
++				v->lfsr = ((v->lfsr << 1) & 0x7fffff) | bit;
++			}
++		}
++	}
++	// hard sync: a voice's phase restarts when its source rolls over
++	for (int i = 0; i < 3; i++) {
++		struct sid_voice *v = &s->v[i];
++		if ((v->ctrl & CTRL_SYNC) && s->v[(i + 2) % 3].msb_rise && !(v->ctrl & CTRL_TEST)) {
++			v->acc = 0;
++		}
++		envelope_cycle(v);
++	}
++}
++
++void sid_render(struct sid *s, float *out, int nframes) {
++	const unsigned vol = s->mode_vol & 15;
++	const unsigned cutoff = ((unsigned)s->cutoff_hi << 3) | s->cutoff_lo;     // 11 bits
++	const unsigned res = s->res_filt >> 4;
++	float fc_hz = 30.0f + cutoff * 5.8f;                                       // ~30 Hz .. ~12 kHz
++	if (fc_hz > 0.45f * s->sample_rate) fc_hz = 0.45f * s->sample_rate;
++	const float g = tanf(3.14159265f * fc_hz / s->sample_rate);
++	const float k = 1.4f - 1.25f * res / 15.0f;                                 // resonance lowers damping
++	const float a1 = 1.0f / (1.0f + g * (g + k)), a2 = g * a1, a3 = g * a2;
++	const unsigned sub = 4;                                                     // cycles between output samples taken
++
++	for (int n = 0; n < nframes; n++) {
++		s->cycle_error += s->clock_hz;
++		unsigned cycles = s->cycle_error / s->sample_rate;
++		s->cycle_error -= cycles * s->sample_rate;
++
++		float direct = 0.0f, filt = 0.0f;
++		unsigned taken = 0;
++		float sum_direct = 0.0f, sum_filt = 0.0f;
++		for (unsigned c = 0; c < cycles; c++) {
++			cycle(s);
++			if ((c % sub) != 0) continue;
++			taken++;
++			for (int i = 0; i < 3; i++) {
++				const struct sid_voice *v = &s->v[i];
++				float o = ((int)wave(s, i) - 2048) * (float)v->env / 255.0f;   // about +-2048
++				if (s->res_filt & (1 << i)) {
++					sum_filt += o;
++				} else if (!(i == 2 && (s->mode_vol & 0x80))) {
++					sum_direct += o;
++				}
++			}
++		}
++		if (taken) {
++			direct = sum_direct / taken;
++			filt = sum_filt / taken;
++		}
++
++		// state-variable filter (trapezoidal integration, stable at any cutoff)
++		// on the voices routed to it; s->bp and s->lp hold its two integrator states
++		float v3 = filt - s->lp;
++		float v1 = a1 * s->bp + a2 * v3;
++		float v2 = s->lp + a2 * s->bp + a3 * v3;
++		s->bp = 2.0f * v1 - s->bp;
++		s->lp = 2.0f * v2 - s->lp;
++		float low = v2, band = v1, hp = filt - k * v1 - v2;
++		float fo = 0.0f;
++		if (s->mode_vol & 0x10) fo += low;
++		if (s->mode_vol & 0x20) fo += band;
++		if (s->mode_vol & 0x40) fo += hp;
++
++		float sample = (direct + fo) * (float)vol / 15.0f / 6144.0f * 1.6f;  // three voices at full scale ~ +-1
++		if (sample > 1.0f) sample = 1.0f;
++		if (sample < -1.0f) sample = -1.0f;
++		float a = fabsf(sample);
++		if (a > s->peak) s->peak = a;
++		s->frames++;
++		if (out) out[n] = sample;
++	}
++}
+diff --git a/src/sid.h b/src/sid.h
+new file mode 100644
+index 00000000..d7595cb4
+--- /dev/null
++++ b/src/sid.h
+@@ -0,0 +1,73 @@
++/* MOS 6581 "SID" sound chip, as emulated by a CoCoXSID cartridge.
++ *
++ * Copyright 2026
++ *
++ * This file is part of XRoar, a Dragon/Tandy CoCo emulator.
++ *
++ * XRoar is free software; you can redistribute it and/or modify it under the
++ * terms of the GNU General Public License as published by the Free Software
++ * Foundation, either version 3 of the License, or (at your option) any later
++ * version.
++ *
++ * See COPYING.GPL for redistribution conditions.
++ */
++
++/* A compact SID: three voices (triangle, sawtooth, pulse, noise, and ANDed
++ * combinations), ADSR envelopes, ring modulation and hard sync, and the
++ * multimode state-variable filter.  Written from the 6581 data sheet's
++ * behaviour, not copied from another emulator.  Approximations:
++ *
++ * - combined waveforms are the bitwise AND of the selected ones;
++ * - the filter is a state-variable filter with a straight-line cutoff curve,
++ *   not the 6581's measured one;
++ * - the envelope has no "ADSR delay bug".
++ *
++ * Registers 0x00-0x18 are write-only (reading them returns 0, standing in for
++ * the bus), 0x19/0x1A (paddles) read 0xFF, 0x1B is OSC3 and 0x1C is ENV3.
++ */
++
++#ifndef XROAR_SID_H_
++#define XROAR_SID_H_
++
++#include <stdint.h>
++
++struct sid_voice {
++	uint32_t acc;          // 24-bit phase accumulator
++	uint16_t freq;
++	uint16_t pw;           // 12-bit pulse width
++	uint8_t ctrl, ad, sr;
++	uint32_t lfsr;         // 23-bit noise shift register
++	int msb_rise;          // accumulator bit 23 rose this cycle
++	// envelope
++	uint8_t env;
++	uint8_t state;         // 0 attack, 1 decay/sustain, 2 release
++	uint8_t gate;
++	uint16_t rate_counter, rate_period;
++	uint8_t exp_counter, exp_period;
++	uint8_t hold_zero;
++};
++
++struct sid {
++	struct sid_voice v[3];
++	uint8_t cutoff_lo, cutoff_hi, res_filt, mode_vol;
++	// timing
++	unsigned clock_hz, sample_rate;
++	unsigned cycle_error;
++	// filter state
++	float lp, bp;
++	// statistics (for logging)
++	float peak;
++	unsigned long frames;
++};
++
++void sid_init(struct sid *s, unsigned clock_hz, unsigned sample_rate);
++void sid_reset(struct sid *s);
++void sid_write(struct sid *s, unsigned reg, uint8_t value);
++uint8_t sid_read(struct sid *s, unsigned reg);
++
++// Render nframes mono samples (about -1..1) at the sample rate, advancing the
++// chip by the matching number of clock cycles.  out may be NULL to just
++// advance.
++void sid_render(struct sid *s, float *out, int nframes);
++
++#endif
+diff --git a/src/xroar.c b/src/xroar.c
+index b9734fef..b7190660 100644
+--- a/src/xroar.c
++++ b/src/xroar.c
+@@ -557,6 +557,10 @@ static char const * const default_config[] = {
+ 	"cart-type ide",
+ 	"cart-becker",
+ #ifndef HAVE_WASM
++	// CoCoXSID: a SID sound chip in a cartridge
++	"cart cocoxsid",
++	"cart-desc 'CoCoXSID (SID sound)'",
++	"cart-type cocoxsid",
+ 	// CoCoSDC cartridge (implementation from the nowhereman999 fork)
+ 	"cart cocosdc",
+ 	"cart-desc 'CoCoSDC'",
+diff --git a/tools/sid_test.c b/tools/sid_test.c
+new file mode 100644
+index 00000000..24cd26a4
+--- /dev/null
++++ b/tools/sid_test.c
+@@ -0,0 +1,219 @@
++/* Standalone test of the SID core (src/sid.c).
++ *   cc -I. -Isrc -o sid_test tools/sid_test.c src/sid.c -lm && ./sid_test
++ * Each check measures the generated audio or the chip's registers against what
++ * the 6581 data sheet says (pitch from the frequency word at a 1 MHz clock,
++ * envelope times, pulse width, filter response, hard sync, readable registers).
++ */
++#include <math.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++
++#include "sid.h"
++
++#define CLK 1000000
++#define RATE 48000
++
++static int failures;
++static void check(int ok, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
++#include <stdarg.h>
++static void check(int ok, const char *fmt, ...) {
++	va_list ap;
++	printf("  %s ", ok ? "ok  " : "FAIL");
++	va_start(ap, fmt);
++	vprintf(fmt, ap);
++	va_end(ap);
++	printf("\n");
++	if (!ok) failures++;
++}
++
++static void w(struct sid *s, unsigned r, unsigned v) { sid_write(s, r, (uint8_t)v); }
++
++/* voice 1 note: freq word, control byte, with an instant, full-sustain envelope */
++static void note(struct sid *s, unsigned voice, unsigned f, unsigned ctrl, unsigned pw) {
++	unsigned b = voice * 7;
++	w(s, b + 0, f & 255); w(s, b + 1, f >> 8);
++	w(s, b + 2, pw & 255); w(s, b + 3, pw >> 8);
++	w(s, b + 5, 0x00);       // attack 0, decay 0
++	w(s, b + 6, 0xf0);       // sustain 15, release 0
++	w(s, b + 4, ctrl | 1);   // gate on
++}
++
++static void settle(struct sid *s) { sid_render(s, NULL, RATE / 10); }   // let the envelope reach sustain
++
++static double rms(const float *b, int n) {
++	double t = 0;
++	for (int i = 0; i < n; i++) t += b[i] * b[i];
++	return sqrt(t / n);
++}
++
++static double hz_by_crossings(const float *b, int n) {
++	int c = 0;
++	for (int i = 1; i < n; i++) if (b[i - 1] < 0 && b[i] >= 0) c++;
++	return c * (double)RATE / n;
++}
++
++int main(void) {
++	static float buf[RATE * 2];
++	struct sid s;
++
++	printf("== pitch (frequency word at a 1 MHz clock)\n");
++	{
++		unsigned f440 = (unsigned)lround(440 * 16.777216);
++		const struct { const char *name; unsigned ctrl; } w3[] = { { "triangle", 0x10 }, { "sawtooth", 0x20 }, { "pulse", 0x40 } };
++		for (int i = 0; i < 3; i++) {
++			sid_init(&s, CLK, RATE);
++			w(&s, 0x18, 15);
++			note(&s, 0, f440, w3[i].ctrl, 0x800);
++			settle(&s);
++			sid_render(&s, buf, RATE);
++			double hz = hz_by_crossings(buf, RATE);
++			check(fabs(hz - 440.0) < 2.0, "%s with word %u plays %.1f Hz (440)", w3[i].name, f440, hz);
++		}
++		sid_init(&s, CLK, RATE);
++		w(&s, 0x18, 15);
++		note(&s, 0, 7382 * 2, 0x10, 0);
++		settle(&s);
++		sid_render(&s, buf, RATE);
++		check(fabs(hz_by_crossings(buf, RATE) - 880.0) < 3.0, "doubling the word doubles the pitch (%.1f Hz)", hz_by_crossings(buf, RATE));
++	}
++
++	printf("== pulse width\n");
++	{
++		sid_init(&s, CLK, RATE);
++		w(&s, 0x18, 15);
++		note(&s, 0, (unsigned)lround(220 * 16.777216), 0x40, 0x400);   // 25%
++		settle(&s);
++		sid_render(&s, buf, RATE);
++		int hi = 0;
++		for (int i = 0; i < RATE; i++) if (buf[i] > 0) hi++;
++		check(fabs(hi / (double)RATE - 0.25) < 0.02, "pulse width $400 is high %.1f%% of the time (25%%)", 100.0 * hi / RATE);
++	}
++
++	printf("== envelope times (data sheet: attack 2 ms .. 8 s)\n");
++	{
++		const struct { unsigned a; double ms; } att[] = { { 0, 2 }, { 4, 38 }, { 7, 80 }, { 9, 250 }, { 11, 800 } };
++		for (unsigned i = 0; i < sizeof att / sizeof att[0]; i++) {
++			sid_init(&s, CLK, RATE);
++			w(&s, 0x18, 15);
++			w(&s, 0x0e, 0x00); w(&s, 0x0f, 0x10);          // voice 3 running
++			w(&s, 0x13, att[i].a << 4); w(&s, 0x14, 0xf0);
++			w(&s, 0x12, 0x11);                              // triangle + gate
++			double ms = -1;
++			for (int step = 0; step < 100000 && ms < 0; step++) {
++				sid_render(&s, NULL, 1);
++				if (sid_read(&s, 0x1c) == 0xff) ms = step * 1000.0 / RATE;
++			}
++			check(ms >= 0 && fabs(ms - att[i].ms) <= att[i].ms * 0.15 + 1.0, "attack %u reaches full level in %.0f ms (%.0f)", att[i].a, ms, att[i].ms);
++		}
++		// decay to a sustain level, then hold
++		sid_init(&s, CLK, RATE);
++		w(&s, 0x18, 15);
++		w(&s, 0x13, 0x04); w(&s, 0x14, 0x80);              // attack 0, decay 4, sustain 8, release 0
++		w(&s, 0x12, 0x11);
++		sid_render(&s, NULL, RATE);
++		unsigned e1 = sid_read(&s, 0x1c);
++		sid_render(&s, NULL, RATE);
++		unsigned e2 = sid_read(&s, 0x1c);
++		check(e1 == 136 && e2 == 136, "sustain level 8 holds at %u then %u (136)", e1, e2);
++		// release back to silence
++		w(&s, 0x14, 0x84);                                  // release 4 (114 ms nominal)
++		w(&s, 0x12, 0x10);                                  // gate off
++		double ms = -1;
++		for (int step = 0; step < 100000 && ms < 0; step++) {
++			sid_render(&s, NULL, 1);
++			if (sid_read(&s, 0x1c) == 0) ms = step * 1000.0 / RATE;
++		}
++		check(ms > 60 && ms < 300, "release 4 drops from sustain to nothing in %.0f ms (data sheet: 114 ms for a full fall)", ms);
++	}
++
++	printf("== master volume and voice 3 off\n");
++	{
++		double r[3];
++		unsigned vols[3] = { 0, 7, 15 };
++		for (int i = 0; i < 3; i++) {
++			sid_init(&s, CLK, RATE);
++			w(&s, 0x18, vols[i]);
++			note(&s, 0, 7382, 0x20, 0);
++			settle(&s);
++			sid_render(&s, buf, RATE / 2);
++			r[i] = rms(buf, RATE / 2);
++		}
++		check(r[0] < 1e-6, "volume 0 is silent (rms %.5f)", r[0]);
++		check(fabs(r[2] / r[1] - 15.0 / 7.0) < 0.1, "volume 15 is %.2f times volume 7 (2.14)", r[2] / r[1]);
++		sid_init(&s, CLK, RATE);
++		w(&s, 0x18, 15 | 0x80);                               // voice 3 off
++		note(&s, 2, 7382, 0x20, 0);
++		settle(&s);
++		sid_render(&s, buf, RATE / 2);
++		check(rms(buf, RATE / 2) < 1e-6, "voice 3 off silences voice 3 (rms %.5f)", rms(buf, RATE / 2));
++	}
++
++	printf("== filter\n");
++	{
++		double un, lp, hp;
++		sid_init(&s, CLK, RATE); w(&s, 0x18, 15);
++		note(&s, 0, (unsigned)lround(2000 * 16.777216), 0x20, 0); settle(&s); sid_render(&s, buf, RATE / 2); un = rms(buf, RATE / 2);
++		sid_init(&s, CLK, RATE); w(&s, 0x18, 15 | 0x10); w(&s, 0x17, 0x01); w(&s, 0x16, 0x08);   // low-pass, cutoff low, voice 1 filtered
++		note(&s, 0, (unsigned)lround(2000 * 16.777216), 0x20, 0); settle(&s); sid_render(&s, buf, RATE / 2); lp = rms(buf, RATE / 2);
++		check(lp < un * 0.5, "low-pass at a low cutoff takes a 2 kHz saw down %.1f dB", 20 * log10(un / lp));
++		sid_init(&s, CLK, RATE); w(&s, 0x18, 15);
++		note(&s, 0, (unsigned)lround(100 * 16.777216), 0x20, 0); settle(&s); sid_render(&s, buf, RATE / 2); un = rms(buf, RATE / 2);
++		sid_init(&s, CLK, RATE); w(&s, 0x18, 15 | 0x40); w(&s, 0x17, 0x01); w(&s, 0x16, 0xf0);  // high-pass, cutoff high
++		note(&s, 0, (unsigned)lround(100 * 16.777216), 0x20, 0); settle(&s); sid_render(&s, buf, RATE / 2); hp = rms(buf, RATE / 2);
++		check(hp < un * 0.5, "high-pass at a high cutoff takes a 100 Hz saw down %.1f dB", 20 * log10(un / hp));
++		sid_init(&s, CLK, RATE); w(&s, 0x18, 15 | 0x10); w(&s, 0x17, 0x00); w(&s, 0x16, 0x08);   // filter on but no voice routed to it
++		note(&s, 0, (unsigned)lround(2000 * 16.777216), 0x20, 0); settle(&s); sid_render(&s, buf, RATE / 2);
++		check(rms(buf, RATE / 2) > un * 0.3, "a voice not routed to the filter is not filtered");
++	}
++
++	printf("== hard sync\n");
++	{
++		// voice 1 saw at about 1.5 kHz, synced to voice 3 at 440 Hz: the result repeats at 440 Hz
++		sid_init(&s, CLK, RATE); w(&s, 0x18, 15);
++		note(&s, 2, (unsigned)lround(440 * 16.777216), 0x00, 0);                 // voice 3 silent source, running
++		w(&s, 0x12, 0x01);                                                       // gate only, no waveform
++		note(&s, 0, (unsigned)lround(1510 * 16.777216), 0x22, 0);               // saw + sync
++		settle(&s);
++		sid_render(&s, buf, RATE);
++		int lag = (int)lround(RATE / 440.0), best = 0; double bestc = -1e9;
++		for (int l = 20; l < 400; l++) {
++			double c = 0; for (int i = 0; i < 4000; i++) c += buf[1000 + i] * buf[1000 + i + l];
++			if (c > bestc) { bestc = c; best = l; }
++		}
++		check(abs(best - lag) <= 2, "synced saw repeats every %d samples (440 Hz = %d)", best, lag);
++	}
++
++	printf("== test bit, noise, readable registers\n");
++	{
++		sid_init(&s, CLK, RATE); w(&s, 0x18, 15);
++		note(&s, 0, 7382, 0x28, 0);                                              // saw + test
++		settle(&s); sid_render(&s, buf, 2000);
++		double lo = 1e9, hi = -1e9; for (int i = 0; i < 2000; i++) { if (buf[i] < lo) lo = buf[i]; if (buf[i] > hi) hi = buf[i]; }
++		check(hi - lo < 1e-6, "the test bit holds the oscillator still");
++		sid_init(&s, CLK, RATE); w(&s, 0x18, 15);
++		note(&s, 0, 0xc000, 0x80, 0); settle(&s); sid_render(&s, buf, 4000);
++		double m = 0; for (int i = 0; i < 4000; i++) m += buf[i]; m /= 4000;
++		double v = 0; for (int i = 0; i < 4000; i++) v += (buf[i] - m) * (buf[i] - m);
++		check(sqrt(v / 4000) > 0.05, "noise is not a steady tone (rms %.3f)", sqrt(v / 4000));
++		// OSC3 changes, ENV3 follows the gate, write-only registers read as 0
++		sid_init(&s, CLK, RATE);
++		w(&s, 0x0e, 0xff); w(&s, 0x0f, 0xff); w(&s, 0x12, 0x21); w(&s, 0x13, 0x00); w(&s, 0x14, 0xf0);
++		unsigned seen[16]; int n = 0, distinct = 0;
++		for (int k = 0; k < 16; k++) { sid_render(&s, NULL, 7); seen[k] = sid_read(&s, 0x1b); }
++		for (int a = 0; a < 16; a++) { int d = 1; for (int b2 = 0; b2 < a; b2++) if (seen[b2] == seen[a]) d = 0; distinct += d; n++; }
++		check(distinct > 6, "OSC3 reads %d different values over 16 reads of a fast saw", distinct);
++		check(sid_read(&s, 0x1c) == 0xff, "ENV3 reads full level with the gate on and attack 0");
++		check(sid_read(&s, 0x04) == 0 && sid_read(&s, 0x18) == 0, "write-only registers read as 0");
++		check(sid_read(&s, 0x19) == 0xff, "the paddle inputs read 255");
++		w(&s, 0x12, 0x20);
++		sid_render(&s, NULL, RATE);
++		check(sid_read(&s, 0x1c) == 0, "ENV3 falls to 0 after the gate goes off");
++		sid_reset(&s);
++		sid_render(&s, buf, 1000);
++		check(rms(buf, 1000) == 0, "reset is silent");
++	}
++
++	printf("%s\n", failures ? "FAILURES" : "ALL PASSED");
++	return failures ? 1 : 0;
++}
+-- 
+2.43.0
+

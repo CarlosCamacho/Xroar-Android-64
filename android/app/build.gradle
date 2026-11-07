@@ -17,7 +17,7 @@ android {
         applicationId 'io.github.carloscamacho.xroar'
         minSdk 24
         targetSdk 34
-        versionCode 5
+        versionCode 6
         versionName '1.13.0.dev-128d7c64-sdc'
         // build.sh passes -PxroarAbis=<the ABIs it built>
         ndk { abiFilters(*((project.findProperty('xroarAbis') ?: 'arm64-v8a,armeabi-v7a,x86_64').split(','))) }

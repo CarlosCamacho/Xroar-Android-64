@@ -31,6 +31,7 @@ managers writing there, but `Android/media/<package>/` stays open to them.)
 
 | Path | What it is |
 |---|---|
+| `paks/` | Cartridge images (`.rom`, `.ccc`) for the Paks browser |
 | `roms/` | ROM images (`bas13.rom`, `extbas11.rom`, `disk11.rom`, `sdcdos.rom`, ...); the folder itself is searched too |
 | `settings.conf` | What the settings screen saves (see below); read at start-up |
 | `xroar.conf` | XRoar's own config, for anything the settings screen doesn't cover; the settings screen overrides it |
@@ -47,8 +48,9 @@ Launch the app once first so the folder exists, then restart it after adding fil
 ### The screen
 
 In portrait the picture is at the top (4:3, full width) with a toolbar above it
-and the keyboard, joystick pad or settings below. In landscape the picture fills
-the screen and those float over it.
+and the keyboard, joystick pad, settings or Paks below. In landscape the picture
+is on the left at full height, and the right-hand column has the toolbar and a
+**Keyboard / Joystick** tab; Settings and Paks replace the tab while open.
 
 | Toolbar | |
 |---|---|
@@ -56,10 +58,13 @@ the screen and those float over it.
 | **Pad** | Show or hide the on-screen joystick (and point a joystick port at it) |
 | **Type...** | Type text with your phone's own keyboard, for pasting programs |
 | **Reset** | Soft reset (the RESET button) or hard reset (power cycle) |
+| **Paks** | The cartridge browser (below) |
 | **Menu** | The settings screen |
 
-**CoCo keyboard.** The real CoCo layout, including BREAK, CLEAR and the arrows.
-It presses CoCo keys, so shifted symbols appear on the keys when SHIFT is on.
+**CoCo keyboard.** The real CoCo layout (stepped rows, two SHIFT keys, ENTER and
+CLEAR, red BREAK, the arrows) with each shifted symbol printed above its key.
+Menu > Input > Keyboard style picks the keycaps: white (CoCo 2, the default),
+cream (TRS-80), black (Hi-Tek) or grey (TRS-80). It presses CoCo keys.
 SHIFT is sticky: tap once for the next key only, tap twice quickly to lock it,
 tap again to let go (Menu > Input turns this off). Several fingers work at once.
 
@@ -68,15 +73,31 @@ joystick, so a port has to use "On-screen pad" (the Pad button sets the right
 port for you). The other option is "Touch screen", where the joystick follows
 your finger over the picture.
 
-**Type...** opens your phone's keyboard; the text is typed into the CoCo (in
-capitals unless you turn that off, since BASIC wants capitals). A Bluetooth
-keyboard also works directly.
+**Type...** opens your phone's keyboard, or a text file (Open text file…); the
+text is typed into the CoCo (in capitals unless you turn that off, since BASIC
+wants capitals). For a BASIC program every line must start with a line number and
+be at most **249** characters: a real Color BASIC cuts a longer line off without
+a word (measured), so the dialog shows the problem lines and will not type until
+they are fixed or you tick "Leave out lines with problems". A Bluetooth keyboard
+also works directly.
+
+**Paks.** Put `.rom` / `.ccc` cartridge images in `paks/` (or use Add… in the Paks
+browser). Tap one to insert it: the CoCo resets and starts it, because a Disk BASIC
+machine cannot take a cartridge swap without a reset. Known Paks show their real
+titles; Eject puts the normal cartridge back.
+
+**ROMs.** Machine > ROM files replaces or removes Color BASIC, Extended BASIC, the
+disk controller ROM and SDC-DOS from a file you pick. The app recognizes the file
+by checksum and files it under the right name.
+
+**Sound.** Machine > Sound cartridge: Games Master Cartridge or CoCoXSID (SID chip
+at $FF40). One at a time, in the Multi-Pak with the disk controller.
 
 **Settings** apply at once while the emulator keeps running, and are saved:
 
 | Tab | What it has |
 |---|---|
-| Machine | CoCo model (NTSC/PAL, 2B), RAM (4/16/32/64 KB), cartridge (disk controller, CoCoSDC, none), soft and hard reset, and which ROM files were found |
+| Machine | CoCo model (NTSC/PAL, 2B), RAM (4/16/32/64 KB), cartridge (disk controller, CoCoSDC, none), sound cartridge, soft and hard reset, ROM files (replace/remove) |
 | Video | TV input (composite blue-red / red-blue for artifact colors, S-Video, RGB), color renderer, picture size, scaling, brightness, contrast, color, hue, 60 Hz scaling, color killer, inverse text |
 | Audio | Mute and volume |
 | Input | Right and left joystick, on-screen pad, keyboard options, Type text |
@@ -184,7 +205,17 @@ harness, **[SRC]** read from source.
   - with a CoCoSDC (a placeholder `sdcdos.rom`, so no SDC-DOS actually runs),
     disks mount on the SD card, a second mount of the same image is refused with
     no floppy fallback, eject works, and drive 2 stays a floppy.
-  Not covered: all of the Java (layout, touch, pickers, dialogs), video, audio.
+  - a Pak (a tiny 6809 program) inserted live resets and starts; a program of
+    long lines types intact up to 249 characters and is cut there (measured);
+  - the CoCoXSID and the Games Master Cartridge load in the Multi-Pak, live or at
+    start-up, and the SID registers read and write from BASIC (`tools/sid_test.c`
+    checks the SID core against the data sheet);
+  - the picture geometry (100% x 100%, 4:3) and the scaling filters, measured from
+    dumped frames.
+  Java logic with no Android calls (ROM identify/install/remove, the Paks scan and
+  filter, the BASIC line checker) has unit tests in `tools/javatest/`.
+  Not covered: all of the Java that draws or touches (keyboard, layout, panels,
+  dialogs, pickers), audio you can hear.
 - [SRC] The CoCoSDC code was reviewed but its own test programs have not been
   run here. Paths stay inside the SD folder, buffers are bounded, and there is
   no networking except an opt-in Becker port.
