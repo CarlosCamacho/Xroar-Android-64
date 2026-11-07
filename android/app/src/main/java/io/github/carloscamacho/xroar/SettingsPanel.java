@@ -1,6 +1,9 @@
 package io.github.carloscamacho.xroar;
 
 import android.content.Context;
+import android.content.res.ColorStateList;
+import android.graphics.drawable.GradientDrawable;
+import android.graphics.drawable.RippleDrawable;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.view.Gravity;
@@ -11,6 +14,7 @@ import android.widget.ArrayAdapter;
 import android.widget.Button;
 import android.widget.CheckBox;
 import android.widget.CompoundButton;
+import android.widget.FrameLayout;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.SeekBar;
@@ -18,15 +22,22 @@ import android.widget.Spinner;
 import android.widget.TextView;
 
 import java.io.File;
+import java.util.HashMap;
+import java.util.Map;
 
 /* The settings screen, modelled on XRoar Online's tabs: Machine, Video, Audio,
  * Input and Files.  Everything applies at once (the emulator keeps running
  * behind it) and is saved in settings.conf. */
 final class SettingsPanel extends LinearLayout {
-    private static final int BG = 0xF0181A1D;
-    private static final int TEXT = 0xFFE8EAED;
-    private static final int DIM = 0xFF9AA0A6;
-    private static final int ACCENT = 0xFF2D7DD2;
+    // Material Design 3, dark scheme
+    private static final int BG = 0xF2121316;        // surface
+    private static final int CARD = 0xFF1E2024;      // surface container
+    private static final int TEXT = 0xFFE3E2E6;      // on surface
+    private static final int DIM = 0xFFC4C6D0;       // on surface variant
+    private static final int OUTLINE = 0xFF8E9099;
+    private static final int ACCENT = 0xFFAAC7FF;    // primary
+    private static final int TONAL = 0xFF284777;     // primary container
+    private static final int ON_TONAL = 0xFFD6E3FF;  // on primary container
 
     private static final String[] TAB_NAMES = { "Machine", "Video", "Audio", "Input", "Files" };
 
@@ -38,6 +49,10 @@ final class SettingsPanel extends LinearLayout {
     private final LinearLayout tabRow;
     private final ScrollView scroll;
     private final Button[] tabButtons = new Button[TAB_NAMES.length];
+    private final View[] tabIndicators = new View[TAB_NAMES.length];
+    private LinearLayout body;                               // the open accordion section's body
+    private final Map<String, Boolean> openState = new HashMap<>();
+    private int sectionCount;
     private LinearLayout content;
     private int tab = 0;
 
@@ -54,8 +69,8 @@ final class SettingsPanel extends LinearLayout {
         TextView title = new TextView(host);
         title.setText("Settings");
         title.setTextColor(TEXT);
-        title.setTextSize(18);
-        title.setTypeface(Typeface.DEFAULT_BOLD);
+        title.setTextSize(22);
+        title.setTypeface(Typeface.DEFAULT);
         title.setPadding(dp(14), dp(6), dp(8), dp(6));
         header.addView(title, new LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
         Button close = flatButton("Close");
@@ -70,7 +85,13 @@ final class SettingsPanel extends LinearLayout {
             Button b = flatButton(TAB_NAMES[i]);
             b.setOnClickListener(v -> showTab(n));
             tabButtons[i] = b;
-            tabRow.addView(b, new LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+            View ind = new View(host);
+            tabIndicators[i] = ind;
+            LinearLayout cell = new LinearLayout(host);
+            cell.setOrientation(VERTICAL);
+            cell.addView(b, new LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+            cell.addView(ind, new LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(3)));
+            tabRow.addView(cell, new LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
         }
         addView(tabRow, new LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
@@ -106,23 +127,83 @@ final class SettingsPanel extends LinearLayout {
         return b;
     }
 
+    private GradientDrawable round(int color, int radiusDp, int strokeColor) {
+        GradientDrawable g = new GradientDrawable();
+        g.setColor(color);
+        g.setCornerRadius(dp(radiusDp));
+        if (strokeColor != 0) {
+            g.setStroke(dp(1), strokeColor);
+        }
+        return g;
+    }
+
+    /* A Material filled-tonal button. */
     private Button actionButton(String label, Runnable r) {
         Button b = new Button(getContext());
         b.setText(label);
         b.setAllCaps(false);
         b.setTextSize(14);
+        b.setTextColor(ON_TONAL);
+        b.setMinHeight(dp(40));
+        b.setMinimumHeight(dp(40));
+        b.setStateListAnimator(null);
+        b.setBackground(new RippleDrawable(ColorStateList.valueOf(0x33FFFFFF), round(TONAL, 20, 0), null));
         b.setOnClickListener(v -> r.run());
         return b;
     }
 
-    private TextView heading(String t) {
-        TextView v = new TextView(getContext());
-        v.setText(t);
-        v.setTextColor(ACCENT);
-        v.setTextSize(13);
-        v.setTypeface(Typeface.DEFAULT_BOLD);
-        v.setPadding(0, dp(14), 0, dp(4));
-        return v;
+    /* An accordion section: a titled card that opens and closes.  Everything
+     * added with add() until the next section() goes inside it. */
+    private void section(String title) {
+        final String key = tab + "/" + title;
+        Boolean saved = openState.get(key);
+        final boolean[] open = { saved != null ? saved : sectionCount == 0 };
+        sectionCount++;
+        LinearLayout card = new LinearLayout(getContext());
+        card.setOrientation(VERTICAL);
+        card.setBackground(round(CARD, 16, 0));
+        LinearLayout.LayoutParams cp = new LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT);
+        cp.setMargins(0, dp(6), 0, dp(2));
+        content.addView(card, cp);
+
+        LinearLayout head = new LinearLayout(getContext());
+        head.setOrientation(HORIZONTAL);
+        head.setGravity(Gravity.CENTER_VERTICAL);
+        head.setPadding(dp(16), dp(14), dp(16), dp(14));
+        head.setBackground(new RippleDrawable(ColorStateList.valueOf(0x22FFFFFF), null, round(0xFFFFFFFF, 16, 0)));
+        TextView t = new TextView(getContext());
+        String nice = title.substring(0, 1) + title.substring(1).toLowerCase(java.util.Locale.US);
+        t.setText(nice);
+        t.setTextColor(TEXT);
+        t.setTextSize(16);
+        head.addView(t, new LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        final TextView chev = new TextView(getContext());
+        chev.setTextColor(DIM);
+        chev.setTextSize(18);
+        head.addView(chev);
+        card.addView(head);
+
+        final LinearLayout inner = new LinearLayout(getContext());
+        inner.setOrientation(VERTICAL);
+        inner.setPadding(dp(16), 0, dp(16), dp(14));
+        card.addView(inner);
+        final Runnable apply = () -> {
+            inner.setVisibility(open[0] ? View.VISIBLE : View.GONE);
+            chev.setText(open[0] ? "▴" : "▾");
+        };
+        apply.run();
+        head.setOnClickListener(v -> {
+            open[0] = !open[0];
+            openState.put(key, open[0]);
+            apply.run();
+        });
+        body = inner;
+    }
+
+    /* Add to the open section (or straight to the page if there is none). */
+    private void add(View v) {
+        (body != null ? body : content).addView(v);
     }
 
     private TextView note(String t) {
@@ -157,13 +238,17 @@ final class SettingsPanel extends LinearLayout {
         LinearLayout row = new LinearLayout(getContext());
         row.setOrientation(HORIZONTAL);
         for (Button b : buttons) {
-            row.addView(b, new LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+            LinearLayout.LayoutParams lp = new LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+            lp.setMargins(dp(3), dp(4), dp(3), dp(4));
+            row.addView(b, lp);
         }
         return row;
     }
 
-    private Spinner spinner(String[] labels, final String[] values, String current, final OnPick cb) {
+    private View spinner(String[] labels, final String[] values, String current, final OnPick cb) {
         Spinner sp = new Spinner(getContext());
+        sp.setBackground(round(0x00000000, 8, OUTLINE));
+        sp.setPadding(dp(8), dp(6), dp(8), dp(6));
         ArrayAdapter<String> ad = new ArrayAdapter<>(getContext(), android.R.layout.simple_spinner_item, labels);
         ad.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
         sp.setAdapter(ad);
@@ -189,7 +274,18 @@ final class SettingsPanel extends LinearLayout {
             public void onNothingSelected(AdapterView<?> parent) {
             }
         });
-        return sp;
+        FrameLayout box = new FrameLayout(getContext());
+        box.addView(sp, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT));
+        TextView arrow = new TextView(getContext());
+        arrow.setText("▾");
+        arrow.setTextColor(DIM);
+        arrow.setTextSize(16);
+        arrow.setPadding(0, 0, dp(12), 0);
+        box.addView(arrow, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.END | Gravity.CENTER_VERTICAL));
+        arrow.setClickable(false);
+        return box;
     }
 
     private CheckBox check(String label, boolean on, final OnBool cb) {
@@ -197,6 +293,7 @@ final class SettingsPanel extends LinearLayout {
         c.setText(label);
         c.setTextColor(TEXT);
         c.setChecked(on);
+        c.setButtonTintList(ColorStateList.valueOf(ACCENT));
         c.setOnCheckedChangeListener(new CompoundButton.OnCheckedChangeListener() {
             @Override
             public void onCheckedChanged(CompoundButton b, boolean checked) {
@@ -220,6 +317,8 @@ final class SettingsPanel extends LinearLayout {
         top.addView(reset);
         box.addView(top);
         final SeekBar sb = new SeekBar(getContext());
+        sb.setProgressTintList(ColorStateList.valueOf(ACCENT));
+        sb.setThumbTintList(ColorStateList.valueOf(ACCENT));
         sb.setMax(max - min);
         sb.setProgress(value - min);
         sb.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
@@ -255,12 +354,15 @@ final class SettingsPanel extends LinearLayout {
     private void showTab(int n) {
         tab = n;
         for (int i = 0; i < tabButtons.length; i++) {
-            tabButtons[i].setTextColor(i == n ? ACCENT : TEXT);
+            tabButtons[i].setTextColor(i == n ? ACCENT : DIM);
             tabButtons[i].setTypeface(i == n ? Typeface.DEFAULT_BOLD : Typeface.DEFAULT);
+            tabIndicators[i].setBackgroundColor(i == n ? ACCENT : 0x00000000);
         }
         content = new LinearLayout(getContext());
         content.setOrientation(VERTICAL);
-        content.setPadding(dp(14), dp(2), dp(14), dp(24));
+        content.setPadding(dp(12), dp(4), dp(12), dp(24));
+        body = null;
+        sectionCount = 0;
         switch (n) {
         case 0: buildMachine(); break;
         case 1: buildVideo(); break;
@@ -275,79 +377,73 @@ final class SettingsPanel extends LinearLayout {
 
     private void buildMachine() {
         final Settings s = host.settings();
-        content.addView(heading("MACHINE"));
-        content.addView(labeled("Machine", spinner(
+        section("MACHINE");
+        add(labeled("Machine", spinner(
                 new String[] { "CoCo (NTSC)", "CoCo (PAL)", "CoCo 2B (NTSC)", "CoCo 2B (PAL)" },
                 new String[] { "cocous", "coco", "coco2bus", "coco2b" },
                 s.get("machine", "cocous"), v -> host.applyMachineSetting("machine", v))));
-        content.addView(labeled("RAM", spinner(
+        add(labeled("RAM", spinner(
                 new String[] { "4 KB", "16 KB", "32 KB", "64 KB" },
                 new String[] { "4", "16", "32", "64" },
                 s.get("ram", "64"), v -> host.applyMachineSetting("ram", v))));
-        content.addView(labeled("Cartridge", spinner(
+        add(labeled("Cartridge", spinner(
                 new String[] { "Automatic", "Disk controller (RS-DOS)", "CoCoSDC", "None" },
                 new String[] { "auto", "rsdos", "cocosdc", "none" },
                 s.get("cart", "auto"), v -> host.apply("cart", v))));
-        content.addView(note("Automatic uses the CoCoSDC when roms/sdcdos.rom is present, "
+        add(note("Automatic uses the CoCoSDC when roms/sdcdos.rom is present, "
                 + "otherwise the disk controller. Changing these restarts the emulated CoCo."));
-        content.addView(labeled("Sound cartridge", spinner(
-                new String[] { "None", "Games Master Cartridge", "CoCoXSID (SID chip)" },
-                new String[] { "none", "gmc", "cocoxsid" },
-                s.get("sound", "none"), v -> host.apply("sound", v))));
-        content.addView(note("Sound cartridges share the Multi-Pak with the disk controller. Only one at a time. "
-                + "CoCoXSID is the SID chip board (registers at $FF40); the Games Master Cartridge adds "
-                + "a sound chip and also runs GMC games."));
 
-        content.addView(heading("ROM FILES"));
+
+        section("ROM FILES");
         for (final RomManager.Slot slot : RomManager.Slot.values()) {
             String label = host.romLabel(slot);
             boolean missing = label == null;
-            content.addView(line(slot.title, TEXT));
-            content.addView(line(missing ? (slot.required ? "MISSING" : "not present (optional)") : label,
+            add(line(slot.title, TEXT));
+            add(line(missing ? (slot.required ? "MISSING" : "not present (optional)") : label,
                     missing ? (slot.required ? 0xFFF28B82 : DIM) : 0xFF81C995));
-            content.addView(buttonRow(
+            add(buttonRow(
                     actionButton(missing ? "Add…" : "Replace…", () -> host.pickRom(slot)),
                     actionButton("Remove", () -> host.removeRom(slot))));
         }
-        content.addView(note("Pick a ROM file from your phone. The app recognizes it by its checksum, "
+        add(note("Pick a ROM file from your phone. The app recognizes it by its checksum, "
                 + "names it correctly, and restarts the CoCo with it. Files go in "
                 + host.homeDir().getPath() + "/roms/."));
     }
 
     private void buildVideo() {
         final Settings s = host.settings();
-        content.addView(heading("PICTURE"));
-        content.addView(labeled("TV input", spinner(
+        section("PICTURE");
+        add(labeled("TV input", spinner(
                 new String[] { "Automatic", "Composite (blue-red)", "Composite (red-blue)", "S-Video", "RGB" },
                 new String[] { "auto", "cmp-br", "cmp-rb", "cmp", "rgb" },
                 s.get("tv_input", "auto"), v -> host.apply("tv_input", v))));
-        content.addView(note("Pick blue-red or red-blue to see the orange/blue artifact colors "
+        add(note("Pick blue-red or red-blue to see the orange/blue artifact colors "
                 + "that CoCo games use. If they look swapped, choose the other one."));
-        content.addView(labeled("Color renderer", spinner(
+        add(labeled("Color renderer", spinner(
                 new String[] { "Automatic", "None", "Simple", "5-bit", "Partial NTSC", "Simulated" },
                 new String[] { "auto", "none", "simple", "5bit", "partial", "simulated" },
                 s.get("ccr", "auto"), v -> host.apply("ccr", v))));
-        content.addView(labeled("Picture size", spinner(
+        add(labeled("Picture size", spinner(
                 new String[] { "Zoomed (fills the width)", "Automatic (with border)", "Title", "Action", "Underscan" },
                 new String[] { "zoomed", "auto", "title", "action", "underscan" },
                 s.get("picture", "zoomed"), v -> host.apply("picture", v))));
-        content.addView(labeled("Scaling", spinner(
+        add(labeled("Scaling", spinner(
                 new String[] { "Sharp bilinear (best)", "Hard pixels (nearest)", "Smooth (linear)" },
                 new String[] { "auto", "nearest", "linear" },
                 s.get("gl_filter", "auto"), v -> host.apply("gl_filter", v))));
 
-        content.addView(heading("ADJUST"));
-        content.addView(adjust(s, "brightness", "Brightness", 0, 100, 52, ""));
-        content.addView(adjust(s, "contrast", "Contrast", 0, 100, 52, ""));
-        content.addView(adjust(s, "saturation", "Color", 0, 100, 50, ""));
-        content.addView(adjust(s, "hue", "Hue", -179, 180, 0, "°"));
+        section("ADJUST");
+        add(adjust(s, "brightness", "Brightness", 0, 100, 52, ""));
+        add(adjust(s, "contrast", "Contrast", 0, 100, 52, ""));
+        add(adjust(s, "saturation", "Color", 0, 100, 50, ""));
+        add(adjust(s, "hue", "Hue", -179, 180, 0, "°"));
 
-        content.addView(heading("OPTIONS"));
-        content.addView(check("60 Hz scaling", s.getBool("ntsc_scaling", false),
+        section("OPTIONS");
+        add(check("60 Hz scaling", s.getBool("ntsc_scaling", false),
                 b -> host.apply("ntsc_scaling", b ? "1" : "0")));
-        content.addView(check("Color killer", s.getBool("cmp_colour_killer", false),
+        add(check("Color killer", s.getBool("cmp_colour_killer", false),
                 b -> host.apply("cmp_colour_killer", b ? "1" : "0")));
-        content.addView(check("Inverse text", s.getBool("vdg_inverse", false),
+        add(check("Inverse text", s.getBool("vdg_inverse", false),
                 b -> host.apply("vdg_inverse", b ? "1" : "0")));
     }
 
@@ -359,19 +455,27 @@ final class SettingsPanel extends LinearLayout {
 
     private void buildAudio() {
         final Settings s = host.settings();
-        content.addView(heading("AUDIO"));
-        content.addView(check("Mute", s.getBool("mute", false), b -> {
+        section("AUDIO");
+        add(check("Mute", s.getBool("mute", false), b -> {
             s.setBool("mute", b);
             host.sendSet("gain", b ? "-50" : Integer.toString(s.getInt("gain", -3)));
         }));
-        content.addView(slider("Volume", -49, 3, s.getInt("gain", -3), -3, " dB",
+        add(slider("Volume", -49, 3, s.getInt("gain", -3), -3, " dB",
                 v -> {
                     if (!s.getBool("mute", false)) {
                         host.sendSet("gain", Integer.toString(v));
                     }
                 },
                 v -> s.setInt("gain", v)));
-        content.addView(note("Gain in decibels: 0 is full scale, -3 is the default, lower is quieter. "
+        section("SOUND CARTRIDGE");
+        add(labeled("Sound cartridge", spinner(
+                new String[] { "None", "Games Master Cartridge", "CoCoXSID (SID chip)" },
+                new String[] { "none", "gmc", "cocoxsid" },
+                s.get("sound", "none"), v -> host.apply("sound", v))));
+        add(note("Sound cartridges share the Multi-Pak with the disk controller. Only one at a time. "
+                + "CoCoXSID is the SID chip board (registers at $FF40); the Games Master Cartridge adds "
+                + "a sound chip and also runs GMC games."));
+        add(note("Gain in decibels: 0 is full scale, -3 is the default, lower is quieter. "
                 + "The phone's volume keys control the overall level."));
     }
 
@@ -379,30 +483,27 @@ final class SettingsPanel extends LinearLayout {
         final Settings s = host.settings();
         final String[] joyLabels = { "None", "Touch screen (mouse)", "On-screen pad (keyboard)" };
         final String[] joyValues = { "none", "mjoy0", "kjoy0" };
-        content.addView(heading("JOYSTICKS"));
-        content.addView(labeled("Right joystick", spinner(joyLabels, joyValues,
+        section("JOYSTICKS");
+        add(labeled("Right joystick", spinner(joyLabels, joyValues,
                 s.get("joy_right", "mjoy0"), v -> host.applyJoystick("joy_right", v))));
-        content.addView(labeled("Left joystick", spinner(joyLabels, joyValues,
+        add(labeled("Left joystick", spinner(joyLabels, joyValues,
                 s.get("joy_left", "none"), v -> host.applyJoystick("joy_left", v))));
-        content.addView(note("Most games use the right joystick. \"Touch screen\" moves the joystick to where "
+        add(note("Most games use the right joystick. \"Touch screen\" moves the joystick to where "
                 + "you touch the picture. \"On-screen pad\" gives a direction pad and two fire buttons."));
-        content.addView(labeled("Joystick type", spinner(PadView.TYPE_NAMES, PadView.TYPE_IDS,
+        add(labeled("Joystick type", spinner(PadView.TYPE_NAMES, PadView.TYPE_IDS,
                 s.get("ui_joy_type", "std"), v -> host.setUiString("ui_joy_type", v))));
-        content.addView(note("Drawn from above like the real controllers. The Radio Shack joystick stays where you "
+        add(note("Drawn from above like the real controllers. The Radio Shack joystick stays where you "
                 + "leave it (push it back to center); the Deluxe and Wico spring back. The Wico has two buttons: "
                 + "the red one on the base and the white tip of the ball."));
-        content.addView(check("Show on-screen pad", s.getBool("ui_pad", false), b -> host.setPadVisible(b)));
+        add(check("Show on-screen pad", s.getBool("ui_pad", false), b -> host.setPadVisible(b)));
 
-        content.addView(heading("KEYBOARD"));
-        content.addView(check("Show CoCo keyboard", s.getBool("ui_kbd", true), b -> host.setKeyboardVisible(b)));
-        content.addView(check("Sticky SHIFT (tap once for one key, twice to lock)", s.getBool("ui_sticky", true),
+        section("KEYBOARD");
+        add(check("Show CoCo keyboard", s.getBool("ui_kbd", true), b -> host.setKeyboardVisible(b)));
+        add(check("Sticky SHIFT (tap once for one key, twice to lock)", s.getBool("ui_sticky", true),
                 b -> host.setUi("ui_sticky", b)));
-        content.addView(check("Vibrate on key press", s.getBool("ui_haptic", true), b -> host.setUi("ui_haptic", b)));
-        content.addView(labeled("Keyboard style", spinner(CocoKeyboardView.STYLE_NAMES, CocoKeyboardView.STYLE_IDS,
+        add(check("Vibrate on key press", s.getBool("ui_haptic", true), b -> host.setUi("ui_haptic", b)));
+        add(labeled("Keyboard style", spinner(CocoKeyboardView.STYLE_NAMES, CocoKeyboardView.STYLE_IDS,
                 s.get("ui_kbd_style", "white"), v -> host.setUiString("ui_kbd_style", v))));
-        content.addView(buttonRow(actionButton("Type text…", () -> host.showTypeDialog())));
-        content.addView(note("\"Type text\" uses your phone's own keyboard, or a text file, and types it into the CoCo, "
-                + "so you can paste programs. A Bluetooth keyboard also works."));
     }
 
     private String shortName(String path) {
@@ -414,35 +515,35 @@ final class SettingsPanel extends LinearLayout {
 
     private void buildFiles() {
         final Settings s = host.settings();
-        content.addView(heading("DISK DRIVES"));
+        section("DISK DRIVES");
         for (int d = 0; d < 4; d++) {
             final int drive = d;
-            content.addView(line("Drive " + (d + 1) + ":  " + shortName(s.get("disk" + d, "")), TEXT));
-            content.addView(buttonRow(
+            add(line("Drive " + (d + 1) + ":  " + shortName(s.get("disk" + d, "")), TEXT));
+            add(buttonRow(
                     actionButton("Insert…", () -> host.pickFile(MainActivity.REQ_DISK + drive)),
                     actionButton("Eject", () -> host.ejectDisk(drive))));
         }
-        content.addView(note("With a CoCoSDC selected, drives 1 and 2 are the SD card's, and each disk image "
+        add(note("With a CoCoSDC selected, drives 1 and 2 are the SD card's, and each disk image "
                 + "can be in only one of them."));
 
-        content.addView(heading("CASSETTE"));
-        content.addView(line("Tape:  " + shortName(host.tapeName()), TEXT));
-        content.addView(buttonRow(
+        section("CASSETTE");
+        add(line("Tape:  " + shortName(host.tapeName()), TEXT));
+        add(buttonRow(
                 actionButton("Insert…", () -> host.pickFile(MainActivity.REQ_TAPE)),
                 actionButton("Play/Pause", () -> host.command(MainActivity.OP_TAPE_PLAYPAUSE, 0, 0, null))));
-        content.addView(buttonRow(
+        add(buttonRow(
                 actionButton("Rewind", () -> host.command(MainActivity.OP_TAPE_REWIND, 0, 0, null)),
                 actionButton("Eject", () -> host.ejectTape())));
-        content.addView(note("Then type CLOAD, CLOADM or LOAD on the CoCo; Play starts the tape."));
+        add(note("Then type CLOAD, CLOADM or LOAD on the CoCo; Play starts the tape."));
 
-        content.addView(heading("PROGRAMS"));
-        content.addView(buttonRow(
+        section("PROGRAMS");
+        add(buttonRow(
                 actionButton("Load file…", () -> host.pickFile(MainActivity.REQ_LOAD)),
                 actionButton("Run file…", () -> host.pickFile(MainActivity.REQ_RUN))));
-        content.addView(note("Load attaches a disk, tape or program. Run also tries to start it."));
+        add(note("Load attaches a disk, tape or program. Run also tries to start it."));
 
-        content.addView(heading("FOLDER"));
-        content.addView(note(host.homeDir().getPath()));
-        content.addView(note("ROMs, xroar.conf, the SD card (sdcard/), and the log (xroar-log.txt) live here."));
+        section("FOLDER");
+        add(note(host.homeDir().getPath()));
+        add(note("ROMs, xroar.conf, the SD card (sdcard/), and the log (xroar-log.txt) live here."));
     }
 }

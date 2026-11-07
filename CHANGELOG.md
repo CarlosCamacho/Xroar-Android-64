@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### v8 (versionCode 8)
+
+- Settings restyled after Material Design 3 (dark): tonal buttons, outlined
+  drop-downs, tinted switches and sliders, tab bar with an indicator. Every tab is a
+  set of accordion cards that open and close (the first one starts open; the state
+  is kept while the app runs).
+- Sound cartridge moved from Machine to Audio. "Type text" removed from Input (the
+  toolbar has it).
+
 ### v7 (versionCode 7)
 
 - **Tiny picture fix (a guess, needs your phone).** The v6 screenshot showed the
