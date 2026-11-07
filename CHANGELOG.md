@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+### v10 (versionCode 10)
+
+- Keycaps redrawn from the owner's four keyboard photos: the top face smaller
+  than the footprint and set toward the back, so the front skirt shows tallest,
+  the left skirt is lit and the right one is in shade. Small medium-weight legends
+  at the top left (centered on the grey chiclets), words and arrows sized to fit
+  inside the face with a margin, the space bar blank. The CoCo 2's arrow, SHIFT,
+  ENTER and CLEAR caps are whiter than its cream letter caps. Spacing per keyboard:
+  close on the CoCo 2 and TRS-80, nearly touching on the Hi-Tek, wide on the grey
+  chiclets on their black mat.
+
 ### v9 (versionCode 9)
 
 - The owner's MaterialKolor theme (dark scheme) for the whole UI: `Theme.java`
