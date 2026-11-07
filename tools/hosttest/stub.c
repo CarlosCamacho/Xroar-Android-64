@@ -112,6 +112,13 @@ static void *scenario(void *arg) {
 		}
 		free(sets);
 	} else if (!strcmp(name, "screenfull")) {
+		// SURFACE="w,h": the app reports the picture view's real size, as MainActivity does
+		if (getenv("SURFACE")) {
+			int sw = 0, sh = 0;
+			sscanf(getenv("SURFACE"), "%d,%d", &sw, &sh);
+			cmd(OP_SURFACE, sw, sh, NULL);
+			usleep(300000);
+		}
 		// fill the screen with text so the picture's edges show: all 16 rows
 		char *sets = getenv("SETS") ? strdup(getenv("SETS")) : NULL;
 		for (char *tok = sets ? strtok(sets, ";") : NULL; tok; tok = strtok(NULL, ";")) {

@@ -55,6 +55,12 @@ final class CocoKeyboardView extends View {
         { 0xFFB9BBBD, 0xFF161616, 0xFF5E6165, 0xFFA3A6A9 },
     };
     private static final int BREAK_FACE = 0xFFC8342B;
+    // How the keycaps sit, per style: gap between caps (fraction of a key unit),
+    // corner roundness, and how tall the cap's side shows.  The Hi-Tek keys
+    // nearly touch; the CoCo 2's are rounder with visible gaps.
+    private static final float[] GAP = { 0.06f, 0.035f, 0.012f, 0.03f };
+    private static final float[] ROUND = { 0.20f, 0.10f, 0.05f, 0.12f };
+    private static final float[] SIDE = { 0.08f, 0.05f, 0.04f, 0.06f };
     private static final long DOUBLE_TAP_MS = 450;
 
     private static final class Key {
@@ -122,11 +128,15 @@ final class CocoKeyboardView extends View {
     }
 
     void setStyle(String id) {
-        style = 0;
+        int st = 0;
         for (int i = 0; i < STYLE_IDS.length; i++) {
             if (STYLE_IDS[i].equals(id)) {
-                style = i;
+                st = i;
             }
+        }
+        if (st != style) {
+            style = st;
+            layoutKeys(getWidth(), getHeight());
         }
         invalidate();
     }
@@ -193,9 +203,16 @@ final class CocoKeyboardView extends View {
 
     @Override
     protected void onSizeChanged(int w, int h, int ow, int oh) {
+        layoutKeys(w, h);
+    }
+
+    private void layoutKeys(int w, int h) {
+        if (w <= 0 || h <= 0) {
+            return;
+        }
         float cw = w / COLS;
         float ch = h / (float) ROWS;
-        float gap = Math.max(1.5f, Math.min(cw, ch) * 0.07f);
+        float gap = Math.max(0.8f, Math.min(cw, ch) * GAP[style]);
         for (Key k : keys) {
             k.rect.set(k.x * cw + gap, k.row * ch + gap, (k.x + k.w) * cw - gap, (k.row + 1) * ch - gap * 1.8f);
         }
@@ -228,8 +245,8 @@ final class CocoKeyboardView extends View {
             } else if (k.code == D_SHIFT && (shiftLatched || k.down)) {
                 face = 0xFF5B9BE0;
             }
-            float r = Math.min(k.rect.width(), k.rect.height()) * 0.16f;
-            float lift = k.down ? 0 : k.rect.height() * 0.07f;
+            float r = Math.min(k.rect.width(), k.rect.height()) * ROUND[style];
+            float lift = k.down ? 0 : k.rect.height() * SIDE[style];
             RectF f = new RectF(k.rect.left, k.rect.top + (k.down ? lift : 0),
                     k.rect.right, k.rect.bottom - (k.down ? 0 : lift));
             // the key's side: a darker copy below the face

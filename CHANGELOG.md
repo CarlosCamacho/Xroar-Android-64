@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+### v7 (versionCode 7)
+
+- **Tiny picture fix (a guess, needs your phone).** The v6 screenshot showed the
+  picture as a 47% box in the bottom-left of its view, which matches SDL still
+  thinking the window is 640x480 (its default) inside a larger surface. The glue now
+  asks EGL for the real buffer size, and the app also reports its view size
+  (`OP_SURFACE`); the glue resizes SDL's window and viewport to match and logs
+  `android: display: window ... egl/app ...` in `xroar-log.txt`. [SIM] only the
+  "follows the reported size" part is tested (`== surface`); that this is the
+  phone's cause is [SRC] inference from the screenshot.
+- Three joysticks drawn from above (Input > Joystick type): Radio Shack black
+  (not self-centering, one button), TRS-80 Deluxe (self-centering), Wico (red ball,
+  two buttons: base and ball tip).
+- Keycap gap and roundness differ per style (Hi-Tek keys nearly touch).
+- Soft/hard reset removed from the Machine tab (the toolbar's Reset has them).
+
 ### v6 (versionCode 6)
 
 - **ROM manager.** Machine > ROM files: Replace… and Remove for Color BASIC,

@@ -24,7 +24,8 @@ enum {
 	OP_TYPE,           // s = text to type, as typed (not XRoar escapes)
 	OP_RUN,            // s = path: load and try to autorun
 	OP_LOAD,           // s = path: load or attach, no autorun
-	OP_SET             // s = "name=value", applied live
+	OP_SET,            // s = "name=value", applied live
+	OP_SURFACE         // a, b = the picture view's size in pixels, as Java measured it
 };
 
 void android_enqueue(int op, int a, int b, const char *s);

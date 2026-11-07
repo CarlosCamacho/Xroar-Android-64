@@ -155,7 +155,7 @@ for ABI in $ABIS; do
 	done
 	"$CC" -shared -o "$B/libmain.so" $(cd "$B" && find src -name 'xroar-*.o' | sort | sed "s|^|$B/|") \
 		"$B"/glue-*.o "$B/portalib/libporta.a" \
-		-L"$PREFIX/lib" -lSDL2 -lz -lm -llog -landroid \
+		-L"$PREFIX/lib" -lSDL2 -lz -lm -llog -landroid -lEGL \
 		-Wl,-z,max-page-size=16384 -Wl,--no-undefined -Wl,-soname,libmain.so
 	"$TC/llvm-strip" --strip-unneeded "$B/libmain.so"
 

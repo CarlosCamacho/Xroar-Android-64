@@ -297,9 +297,6 @@ final class SettingsPanel extends LinearLayout {
         content.addView(note("Sound cartridges share the Multi-Pak with the disk controller. Only one at a time. "
                 + "CoCoXSID is the SID chip board (registers at $FF40); the Games Master Cartridge adds "
                 + "a sound chip and also runs GMC games."));
-        content.addView(buttonRow(
-                actionButton("Soft reset", () -> host.command(MainActivity.OP_SOFT_RESET, 0, 0, null)),
-                actionButton("Hard reset", () -> host.command(MainActivity.OP_HARD_RESET, 0, 0, null))));
 
         content.addView(heading("ROM FILES"));
         for (final RomManager.Slot slot : RomManager.Slot.values()) {
@@ -389,6 +386,11 @@ final class SettingsPanel extends LinearLayout {
                 s.get("joy_left", "none"), v -> host.applyJoystick("joy_left", v))));
         content.addView(note("Most games use the right joystick. \"Touch screen\" moves the joystick to where "
                 + "you touch the picture. \"On-screen pad\" gives a direction pad and two fire buttons."));
+        content.addView(labeled("Joystick type", spinner(PadView.TYPE_NAMES, PadView.TYPE_IDS,
+                s.get("ui_joy_type", "std"), v -> host.setUiString("ui_joy_type", v))));
+        content.addView(note("Drawn from above like the real controllers. The Radio Shack joystick stays where you "
+                + "leave it (push it back to center); the Deluxe and Wico spring back. The Wico has two buttons: "
+                + "the red one on the base and the white tip of the ball."));
         content.addView(check("Show on-screen pad", s.getBool("ui_pad", false), b -> host.setPadVisible(b)));
 
         content.addView(heading("KEYBOARD"));

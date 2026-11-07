@@ -174,6 +174,19 @@ read fw2 fh2 asp2 ramp2 <<< "$(shot pic-old 'picture=auto\nntsc_scaling=1\ngl_fi
 echo "  old settings: fills $fw2 x $fh2, aspect $asp2, ramp $ramp2 (what v5 showed)"
 python3 -I -c "import sys; fw,fh,a,r=map(float,sys.argv[1:]); sys.exit(0 if (fw<0.9 or a<1.2) and r>2.2 else 1)" $fw2 $fh2 $asp2 $ramp2 \
 	&& echo "  ok   the test does tell the old look from the new one" || { echo "  FAIL measure.py cannot tell old from new"; fail=1; }
+echo "== surface: a window SDL thinks is 640x480 inside a bigger view (the phone's tiny-picture bug)"
+ppmsize() { head -c 20 "$1" | sed -n 2p; }
+surf() {  # name, SURFACE value ("" = the app says nothing)
+	local T=$W/run-$1; rm -rf "$T"; mkdir -p "$T/roms"
+	cp "$ROMS"/bas13.rom "$ROMS"/extbas11.rom "$ROMS"/disk11.rom "$T/roms/"
+	(cd /; XROAR_HOME=$T SCENARIO=screenfull SURFACE="$2" TAIL=8 XROAR_DUMP_FRAME=$T/frame.ppm XROAR_DUMP_DELAY_MS=9000 \
+		SDL_VIDEODRIVER=offscreen SDL_AUDIODRIVER=dummy timeout 40 "$B/xroar-hosttest" -g 640x480 > /dev/null 2>&1 || true)
+	ppmsize "$T/frame.ppm"
+}
+sz=$(surf surf-none ""); echo "  no size from the app: frame is $sz"
+sz2=$(surf surf-java "1080,810"); echo "  app reports 1080x810: frame is $sz2"
+[ "$sz2" = "1080 810" ] && [ "$sz" = "640 480" ] && echo "  ok   the glue follows the size the app reports" \
+	|| { echo "  FAIL the glue does not follow the reported surface size"; fail=1; }
 echo "== display: the picture follows the surface"
 check "display line logged" "$T/xroar-log.txt" "android: display: window"
 if [ -n "${SDCDOS:-}" ]; then

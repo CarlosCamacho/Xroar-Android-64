@@ -14,6 +14,9 @@
 #define SDL_MAIN_HANDLED
 #endif
 #include <SDL.h>
+#ifdef __ANDROID__
+#include <EGL/egl.h>
+#endif
 
 #include <jni.h>
 #include <limits.h>
@@ -518,6 +521,9 @@ static void apply_setting(char *kv) {
 
 /* - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - */
 
+/* The size the app's view really has, in pixels, as the Java side measured it. */
+static int java_w, java_h;
+
 static void run_command(struct cmd *c) {
 	switch (c->op) {
 	case OP_KEY:           key_event(c->a, c->b); break;
@@ -534,6 +540,7 @@ static void run_command(struct cmd *c) {
 	case OP_RUN:           if (c->s) open_file(c->s, 1); break;
 	case OP_LOAD:          if (c->s) open_file(c->s, 0); break;
 	case OP_SET:           if (c->s) apply_setting(c->s); break;
+	case OP_SURFACE:       java_w = c->a; java_h = c->b; break;
 	default: break;
 	}
 }
@@ -545,6 +552,30 @@ static void run_command(struct cmd *c) {
  * is drawn in) and log what we find, for bug reports. */
 
 static int last_w, last_h;
+
+/* The size of the buffer XRoar is really drawing into.  SDL's idea of the
+ * window can be stale on Android (a phone showed the picture as a small box in
+ * the corner, as if the window were still 640x480), so ask EGL. */
+static int real_size(int *w, int *h) {
+#ifdef __ANDROID__
+	EGLDisplay d = eglGetCurrentDisplay();
+	EGLSurface s = eglGetCurrentSurface(EGL_DRAW);
+	EGLint a = 0, b = 0;
+	if (d != EGL_NO_DISPLAY && s != EGL_NO_SURFACE
+	    && eglQuerySurface(d, s, EGL_WIDTH, &a) && eglQuerySurface(d, s, EGL_HEIGHT, &b)
+	    && a > 0 && b > 0) {
+		*w = a;
+		*h = b;
+		return 1;
+	}
+#endif
+	if (java_w > 0 && java_h > 0) {
+		*w = java_w;
+		*h = java_h;
+		return 1;
+	}
+	return 0;
+}
 
 static void check_display(void) {
 	struct ui_sdl2_interface *u = global_uisdl2;
@@ -561,13 +592,25 @@ static void check_display(void) {
 		w = ww;
 		h = wh;
 	}
+	int rw = 0, rh = 0;
+	int have_real = real_size(&rw, &rh);
+	if (have_real && (rw != w || rh != h)) {
+		// SDL is out of step with the surface: tell it, and the renderer.
+		SDL_SetWindowSize(u->vo_window, rw, rh);
+		if (r) {
+			SDL_Rect vp = { 0, 0, rw, rh };
+			SDL_RenderSetViewport(r, &vp);
+		}
+		w = rw;
+		h = rh;
+	}
 	if (w > 0 && h > 0 && (w != last_w || h != last_h)) {
 		last_w = w;
 		last_h = h;
 		sdl_vo_notify_size_changed(u, w, h);
 		struct vo_interface *vo = u->ui_interface.vo_interface;
-		fprintf(stderr, "android: display: window %dx%d, renderer output %dx%d, picture area %d,%d %dx%d\n",
-			ww, wh, w, h,
+		fprintf(stderr, "android: display: window %dx%d, egl/app %dx%d (%s), using %dx%d, picture area %d,%d %dx%d\n",
+			ww, wh, rw, rh, have_real ? "known" : "unknown", w, h,
 			vo->picture_area.x, vo->picture_area.y, vo->picture_area.w, vo->picture_area.h);
 	}
 }

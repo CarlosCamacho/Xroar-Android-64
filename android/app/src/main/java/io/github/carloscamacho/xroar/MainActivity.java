@@ -68,6 +68,7 @@ public class MainActivity extends SDLActivity {
     static final int OP_RUN = 12;
     static final int OP_LOAD = 13;
     static final int OP_SET = 14;
+    static final int OP_SURFACE = 15;
 
     // File picker request codes
     static final int REQ_DISK = 100;   // + drive 0-3
@@ -359,6 +360,11 @@ public class MainActivity extends SDLActivity {
             layoutAll();
             return ins;
         });
+        mLayout.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, or, ob) -> {
+            if (r - l > 0 && b - t > 0) {
+                command(OP_SURFACE, r - l, b - t, null);
+            }
+        });
         root.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, or, ob) -> {
             if (r - l != or - ol || b - t != ob - ot) {
                 layoutAll();
@@ -373,6 +379,7 @@ public class MainActivity extends SDLActivity {
         kbd.setSticky(sticky);
         kbd.setHaptic(haptic);
         kbd.setStyle(settings.get("ui_kbd_style", "white"));
+        pad.setType(settings.get("ui_joy_type", "std"));
         boolean joyTab = "joy".equals(settings.get("ui_tab", "keys"));
         if (tabKeys != null) {
             tabKeys.setTextColor(joyTab ? Color.WHITE : 0xFF6CB0FF);
