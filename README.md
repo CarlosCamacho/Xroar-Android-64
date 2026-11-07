@@ -6,9 +6,11 @@ Color Computer emulator, built for current Android phones and trimmed to the
 (`arm64-v8a`), 32-bit ARM (`armeabi-v7a`) and `x86_64` (Chromebooks), Android
 7.0 (API 24) and later, with 16 KB page alignment for Android 15+.
 
-It also adds **CoCoSDC** support. The emulation comes from the
+It also adds **CoCoSDC** support (the emulation comes from the
 [nowhereman999 fork of XRoar](https://github.com/nowhereman999/xroar), moved
-onto current upstream XRoar.
+onto current upstream XRoar) and an Android front end modelled on
+[XRoar Online](https://colorcomputerarchive.com/xroar-online/): a CoCo
+on-screen keyboard, an on-screen joystick, and a settings screen.
 
 This repository holds only our code: the Android glue, the Gradle project, the
 CoCoSDC patch and the build script. `build.sh` fetches XRoar and SDL2 at pinned
@@ -30,7 +32,9 @@ managers writing there, but `Android/media/<package>/` stays open to them.)
 | Path | What it is |
 |---|---|
 | `roms/` | ROM images (`bas13.rom`, `extbas11.rom`, `disk11.rom`, `sdcdos.rom`, ...); the folder itself is searched too |
-| `xroar.conf` | Starter config: touch as the right joystick; documents the machine and CoCoSDC options |
+| `settings.conf` | What the settings screen saves (see below); read at start-up |
+| `xroar.conf` | XRoar's own config, for anything the settings screen doesn't cover; the settings screen overrides it |
+| `disks/`, `tapes/` | Copies of disk and tape images picked from the settings screen |
 | `sdcard/` | The CoCoSDC's SD card: `.DSK` images, optional `STARTUP.CFG` (`0=GAME.DSK`) |
 | `xroar-log.txt` | Everything XRoar printed this run; send it with any bug report |
 | `opened/` | Copies of files opened with "Open with XRoar" |
@@ -40,28 +44,64 @@ computer over USB, or with
 `adb push FILE /sdcard/Android/media/io.github.carloscamacho.xroar/roms/`.
 Launch the app once first so the folder exists, then restart it after adding files.
 
-**Which machine starts.** An NTSC CoCo (`cocous`). It needs `bas13.rom` (or
-`bas12`/`bas11`/`bas10`) for Color BASIC, `extbas11.rom` (or `extbas10`) for
-Extended BASIC, and `disk11.rom` (or `disk10`) as the disk controller. Other
-machines in this build, chosen with `default-machine` in `xroar.conf`: `coco`
-(PAL), `coco2b` (PAL, 6847T1), `coco2bus` (NTSC, 6847T1), `deluxecoco`, `mx1600`
-and `cp400`.
+### The screen
+
+In portrait the picture is at the top (4:3, full width) with a toolbar above it
+and the keyboard, joystick pad or settings below. In landscape the picture fills
+the screen and those float over it.
+
+| Toolbar | |
+|---|---|
+| **Keys** | Show or hide the CoCo keyboard |
+| **Pad** | Show or hide the on-screen joystick (and point a joystick port at it) |
+| **Type...** | Type text with your phone's own keyboard, for pasting programs |
+| **Reset** | Soft reset (the RESET button) or hard reset (power cycle) |
+| **Menu** | The settings screen |
+
+**CoCo keyboard.** The real CoCo layout, including BREAK, CLEAR and the arrows.
+It presses CoCo keys, so shifted symbols appear on the keys when SHIFT is on.
+SHIFT is sticky: tap once for the next key only, tap twice quickly to lock it,
+tap again to let go (Menu > Input turns this off). Several fingers work at once.
+
+**Joystick.** A direction pad and two fire buttons. It drives XRoar's keyboard
+joystick, so a port has to use "On-screen pad" (the Pad button sets the right
+port for you). The other option is "Touch screen", where the joystick follows
+your finger over the picture.
+
+**Type...** opens your phone's keyboard; the text is typed into the CoCo (in
+capitals unless you turn that off, since BASIC wants capitals). A Bluetooth
+keyboard also works directly.
+
+**Settings** apply at once while the emulator keeps running, and are saved:
+
+| Tab | What it has |
+|---|---|
+| Machine | CoCo model (NTSC/PAL, 2B), RAM (4/16/32/64 KB), cartridge (disk controller, CoCoSDC, none), soft and hard reset, and which ROM files were found |
+| Video | TV input (composite blue-red / red-blue for artifact colors, S-Video, RGB), color renderer, picture size, scaling, brightness, contrast, color, hue, 60 Hz scaling, color killer, inverse text |
+| Audio | Mute and volume |
+| Input | Right and left joystick, on-screen pad, keyboard options, Type text |
+| Files | Four disk drives (insert/eject), cassette (insert, play/pause, rewind, eject), Load file and Run file |
+
+Disk, tape and program files are picked with Android's file picker and copied
+into the app folder.
+
+**Which machine starts.** An NTSC CoCo (`cocous`) unless Machine says
+otherwise. It needs `bas13.rom` (or `bas12`/`bas11`/`bas10`) for Color BASIC,
+`extbas11.rom` (or `extbas10`) for Extended BASIC, and `disk11.rom` (or `disk10`)
+as the disk controller; the Machine tab shows which it found.
 
 ### CoCoSDC
 
 Put the SDC-DOS ROM in `roms/` as `sdcdos.rom` (it is not bundled). When it is
-there and `xroar.conf` has no `machine-cart` line, the app plugs in a CoCoSDC and serves `sdcard/` as its SD card. Without
-the ROM you keep the normal floppy controller.
+there and Cartridge is "Automatic", the app plugs in a CoCoSDC and serves
+`sdcard/` as its SD card. Without the ROM you keep the normal floppy controller.
+Machine > Cartridge chooses explicitly.
 
-"Open with" on a disk image then copies it to `sdcard/OPENED/`, mounts it as
-SDC drive 0 and types `DOS`, as XRoar does for a floppy. Writes from the CoCo go
-to that copy, and opening the same file again replaces it.
-
-To choose the cartridge yourself, add to `xroar.conf`:
-
-```
-machine-cart cocosdc     # or: machine-cart rsdos
-```
+With a CoCoSDC, drives 1 and 2 (SD drives 0 and 1) are the SD card's: a disk
+picked or opened is copied to `sdcard/OPENED/` and mounted, and writes from the
+CoCo go to that copy. The same disk image can only be in one SD drive; the app
+says so rather than quietly using a floppy drive. "Open with" on a disk image
+mounts it as SD drive 0 and types `DOS`.
 
 ## Building
 
@@ -83,15 +123,25 @@ with one key cannot be installed over one signed with another; uninstall first.
 
 - `android/glue/android_main.c` is `SDL_main()`. It sets `HOME` and the working
   directory to the `Android/media/<package>/` folder that `MainActivity` passes
-  in `XROAR_HOME`, redirects the log, writes the starter
-  config, adds `-sdc-root` and `-cart cocosdc` when they apply, and maps Back
-  to the on-screen keyboard.
-- `build.sh` compiles XRoar unchanged apart from the patches, then rebuilds two
-  objects with one rename each: `main_unix.c` with `-Dmain=xroar_unix_main`, and
-  `sdl2/ui_sdl2.c` with `-Dxroar_run=android_xroar_run`. That second hook lets
-  a file opened while XRoar runs be loaded on the emulator thread.
-- `MainActivity.java` loads `libSDL2.so` and `libmain.so`, copies a
-  `content://` file into `opened/`, and passes it to native code.
+  in `XROAR_HOME`, redirects the log, writes the starter `xroar.conf`, and turns
+  `settings.conf` into XRoar command-line options (so the first boot already has
+  the chosen machine, cartridge and picture settings).
+- `android/glue/android_control.c` is the control layer. `build.sh` compiles XRoar
+  unchanged apart from the patches, then rebuilds two objects with one rename
+  each: `main_unix.c` with `-Dmain=xroar_unix_main`, and `sdl2/ui_sdl2.c` with
+  `-Dxroar_run=android_xroar_run`. Each time XRoar's loop gives the emulator a
+  slice, `android_xroar_run()` runs the commands the Android UI queued (key
+  presses, joystick, resets, disks, tape, typing, live settings), keeps the
+  picture sized to the real surface, and logs the sizes it sees, then calls the
+  real `xroar_run()`. Everything XRoar is asked to do happens on its own thread.
+  Live settings use XRoar's own `ui_update_state()` messages, the same ones its
+  web build's controls use; a RAM or machine change makes XRoar rebuild the
+  machine.
+- `MainActivity.java` loads `libSDL2.so` and `libmain.so` and builds the UI around
+  SDL's view: `CocoKeyboardView` (the keyboard; it sends CoCo key numbers, XRoar's
+  `DSCAN_*`), `PadView` (joystick), `SettingsPanel` (the tabs) and `Settings`
+  (`settings.conf`). It copies `content://` files into the app folder, since
+  native code can't open them.
 - Build-time settings, each forced by Android:
   - CoCo 1/2 only: configure is run with `--disable-coco3 --disable-mc10`, and
     patch 0002 removes the Dragon machine and cart definitions and stops
@@ -109,32 +159,37 @@ with one key cannot be installed over one signed with another; uninstall first.
 Venues: **[HW]** real phone, **[EMU]** Android emulator, **[SIM]** our desktop
 harness, **[SRC]** read from source.
 
-- **Not yet run on any Android device or emulator.** The build machine had no
-  KVM, so no Android emulator could boot.
-- [SIM] Earlier, before CoCoSDC was added: the glue ran against the same XRoar code in a Linux
-  desktop build (`tools/hosttest/`, offscreen SDL, stand-ins for the two
-  Android-only SDL calls). That covered the files-folder setup, config and ROM
-  search paths, starting as a CoCo 3, `-run` at start-up, and a disk opened
-  while running. One bug was found that way and fixed (the bare `~` path
-  entries above).
-- [SIM] After the move to `Android/media`: with placeholder ROMs named
-  `bas13`, `extbas11`, `disk11` the harness starts a `cocous` machine, loads all
-  three, and with `sdcdos.rom` added plugs in the CoCoSDC; a `coco3.rom`
-  selects `coco3`; a `default-machine` line in `xroar.conf` wins. The Java
-  side (`getExternalMediaDirs`, `XROAR_HOME`) is **not** exercised by the
-  harness.
-- [SIM] The CoCo 1/2-only build on the same harness with the owner's real
-  `bas13.rom`, `extbas11.rom` and `disk11.rom` (XRoar's CRC list identifies them
-  as Colour BASIC 1.3, Extended Colour BASIC 1.1 and Disk Extended Colour BASIC
-  1.1): it starts `cocous` with the disk cartridge, and BASIC lines typed at the
-  emulated keyboard (`OPEN "O",#-1` and `PRINT #-1,"..." ;2+2`) came out of the
-  emulated cassette port, with `2+2` computed. Video, sound, touch and disks
-  were not exercised.
-- [SRC] The CoCoSDC code was reviewed but **has not been executed**. Paths stay
-  inside the SD folder, buffers are bounded, and there is no networking except
-  an opt-in Becker port. The fork's own test programs are included in the patch
-  (`tools/cocosdc_*_test.c`, `tools/run-cocosdc-tests.sh`) and have not been run here.
-- Android packaging is checked by `build.sh` on every build: `apksigner` verify,
+- [HW] The owner's phone ran an earlier build (CoCo 1/2 only, before the new
+  screen) and showed the Disk Extended Color BASIC 1.1 banner and `OK` prompt,
+  from the owner's own `bas13`, `extbas11` and `disk11` ROMs. **That build drew the
+  picture as a small box in the bottom-left corner** and had no way to type.
+  The new screen layout, keyboard, joystick pad and settings panel have **not been
+  run on a phone**: the build machine has no KVM, so no Android emulator boots.
+  The display fix is a best effort: the layout now gives SDL an exact 4:3 surface
+  and the native side asks the renderer for its real size and logs it
+  (`android: display: ...` in `xroar-log.txt`).
+- [SIM] `tools/hosttest/run.sh` runs the glue against a Linux build of the same
+  patched XRoar (offscreen SDL, stand-ins for the Android-only calls, real JNI
+  entry points called through a fake `JNIEnv`) with the owner's real ROMs, and
+  checks what the emulated CoCo actually sees, through its printer port
+  (`PRINT #-2`; the cassette file is closed by a reset, the printer is not):
+  - key presses through the on-screen keyboard's path type into BASIC, and so
+    does auto-typing; a shifted key typed with SHIFT latched earlier needs the
+    guard that holds SHIFT until the key's release (the test fails without it);
+  - the on-screen joystick reads `JOYSTK(0)` = 0 with Left held, 31 centred;
+  - settings become the right XRoar options at start-up;
+  - live settings, soft and hard reset, a machine change, tape and disk commands
+    run without a crash, and a live RAM change shows in BASIC (`MEM` 24871 on 64K,
+    8487 on 16K);
+  - with a CoCoSDC (a placeholder `sdcdos.rom`, so no SDC-DOS actually runs),
+    disks mount on the SD card, a second mount of the same image is refused with
+    no floppy fallback, eject works, and drive 2 stays a floppy.
+  Not covered: all of the Java (layout, touch, pickers, dialogs), video, audio.
+- [SRC] The CoCoSDC code was reviewed but its own test programs have not been
+  run here. Paths stay inside the SD folder, buffers are bounded, and there is
+  no networking except an opt-in Becker port.
+- Android lint on the Java reports only style warnings in our files.
+  Packaging is checked by `build.sh` on every build: `apksigner` verify,
   `zipalign -c -P 16`, `aapt` badging.
 
 ## Licence

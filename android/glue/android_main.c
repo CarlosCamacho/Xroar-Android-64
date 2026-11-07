@@ -4,13 +4,16 @@
  * environment and then call XRoar's own main() from main_unix.c, which is
  * compiled with -Dmain=xroar_unix_main.
  *
- * - HOME and the working directory become the app's external files directory
- *   (Android/data/<package>/files), so ROMs and xroar.conf go there, as with
- *   the old 0.31 Android port.  XRoar's ROMPATH/CONFPATH are set at build time
- *   to "~/roms:~/.:~/.xroar/roms" and "~/.:~/.xroar" (XRoar only expands "~/").
- * - stdout/stderr go to xroar-log.txt in that directory (there is no console).
+ * - HOME and the working directory become Android/media/<package>/ (passed by
+ *   MainActivity in XROAR_HOME), where file managers can reach ROMs and
+ *   xroar.conf.  XRoar's ROMPATH/CONFPATH are set at build time to
+ *   "~/roms:~/.:~/.xroar/roms" and "~/.:~/.xroar" (XRoar only expands "~/").
+ * - stdout/stderr go to xroar-log.txt there (there is no console).
  * - A starter xroar.conf is written if none exists.
- * - The Android Back button toggles the on-screen keyboard instead of quitting.
+ * - settings.conf ("key=value" lines, written by the app's settings screen)
+ *   is turned into XRoar command-line options, so the first boot already has
+ *   the chosen machine, cartridge and picture settings.  Command-line options
+ *   override xroar.conf.
  *
  * This file is GPL-3.0-or-later, like XRoar.
  */
@@ -30,35 +33,29 @@
 
 #include <android/log.h>
 
+#include "android_glue.h"
+
 extern int xroar_unix_main(int argc, char **argv);
 
 static const char *starter_conf =
 "# XRoar configuration (Android build)\n"
 "#\n"
 "# This file lives in Android/media/io.github.carloscamacho.xroar/ on your\n"
-"# phone.  Put ROM images in the same folder, or in its roms/ subfolder.\n"
-"# Full option list: https://www.6809.org.uk/xroar/doc/xroar.shtml\n"
-"\n"
-"# Which machine to start.  This build is CoCo 1/2 only; the default is\n"
-"# cocous (NTSC).  Others: coco (PAL), coco2b (PAL, 6847T1), coco2bus (NTSC,\n"
-"# 6847T1).  It needs bas13.rom (or bas12/bas11/bas10) and, for Extended\n"
-"# BASIC, extbas11.rom (or extbas10); disk11.rom is the disk controller.\n"
-"# default-machine cocous\n"
-"\n"
-"# Touching the screen moves the right joystick; touch = fire button.\n"
-"joy-right mjoy0\n"
+"# phone.  Most settings are in the app: open the menu (the gear button).\n"
+"# What the menu sets overrides this file.  Anything else XRoar supports can\n"
+"# go here: https://www.6809.org.uk/xroar/doc/xroar.shtml\n"
+"#\n"
+"# ROM images go in the same folder or its roms/ subfolder.  This build is\n"
+"# CoCo 1/2 only.  It needs bas13.rom (or bas12/bas11/bas10), extbas11.rom\n"
+"# (or extbas10) for Extended BASIC, and disk11.rom (or disk10) for disks.\n"
 "\n"
 "# Uncomment to turn sound off:\n"
 "# ao null\n"
 "\n"
-"# CoCoSDC\n"
-"# The SD card is the sdcard/ folder next to this file: put .DSK images\n"
-"# there, and optionally a STARTUP.CFG with lines like  0=GAME.DSK\n"
-"# When the SDC-DOS ROM is present (roms/sdcdos.rom), the app plugs in a\n"
-"# CoCoSDC by itself.  To choose the cartridge yourself instead, uncomment\n"
-"# ONE of these:\n"
-"# machine-cart cocosdc\n"
-"# machine-cart rsdos\n"
+"# CoCoSDC: the SD card is the sdcard/ folder next to this file; put .DSK\n"
+"# images there, and optionally a STARTUP.CFG with lines like  0=GAME.DSK\n"
+"# With roms/sdcdos.rom present the app plugs in a CoCoSDC by itself (the\n"
+"# menu's Cartridge setting can change that).\n"
 "# To use a different folder as the SD card:\n"
 "# sdc-root ~/sdcard\n";
 
@@ -95,10 +92,35 @@ static int conf_has(const char *key, char *value, size_t valuesz) {
 	return found;
 }
 
+/* settings.conf: the last "key=value" line for key wins.  Returns 1 and copies
+ * the value if present and non-empty. */
+static int setting(const char *key, char *out, size_t outsz) {
+	FILE *f = fopen("settings.conf", "r");
+	if (!f) {
+		return 0;
+	}
+	char line[1024];
+	int found = 0;
+	size_t klen = strlen(key);
+	while (fgets(line, sizeof(line), f)) {
+		if (line[0] == '#') continue;
+		if (strncmp(line, key, klen) != 0 || line[klen] != '=') continue;
+		line[strcspn(line, "\r\n")] = 0;
+		if (line[klen + 1]) {
+			snprintf(out, outsz, "%s", line + klen + 1);
+			found = 1;
+		} else {
+			found = 0;
+		}
+	}
+	fclose(f);
+	return found;
+}
+
 /* Is any of these ROM images (NULL-terminated list of base names) where
  * XRoar's ROM path ("~/roms:~/.") will find it?  XRoar tries NAME.rom,
  * NAME.ROM and NAME. */
-static int rom_present(const char *const *names) {
+int android_rom_present(const char *const *names) {
 	static const char *dirs[] = { "roms/", "" };
 	static const char *exts[] = { ".rom", ".ROM", "" };
 	char p[256];
@@ -114,28 +136,37 @@ static int rom_present(const char *const *names) {
 	return 0;
 }
 
-static const char *const sdcdos_names[] = { "sdcdos", "sdc-dos", "sdc_dos", "SDCDOS", NULL };
+const char *const android_sdcdos_names[] = { "sdcdos", "sdc-dos", "sdc_dos", "SDCDOS", NULL };
 
-static int is_disk_image(const char *path) {
-	const char *dot = strrchr(path, '.');
-	if (!dot) return 0;
-	return !strcasecmp(dot, ".dsk") || !strcasecmp(dot, ".vdk") || !strcasecmp(dot, ".jvc")
-	    || !strcasecmp(dot, ".os9") || !strcasecmp(dot, ".dmk");
-}
+/* - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - */
 
-static void queue_open(char *path);
-
-static int keyboard_watch(void *userdata, SDL_Event *event) {
-	(void)userdata;
-	if (event->type == SDL_KEYUP && event->key.keysym.sym == SDLK_AC_BACK) {
-		if (SDL_IsTextInputActive()) {
-			SDL_StopTextInput();
-		} else {
-			SDL_StartTextInput();
-		}
+static void add(char **args, int *n, const char *flag, const char *val) {
+	args[(*n)++] = strdup(flag);
+	if (val) {
+		args[(*n)++] = strdup(val);
 	}
-	return 1;
 }
+
+/* settings.conf keys that map straight onto one XRoar option.  "S" passes the
+ * value through (unless empty or "auto"); "B" is a yes/no option, given as
+ * -flag for 1 and -no-flag for 0. */
+static const struct {
+	const char *key, *flag;
+	char kind;
+} option_map[] = {
+	{ "ccr",               "ccr",               'S' },
+	{ "picture",           "vo-picture",        'S' },
+	{ "gl_filter",         "gl-filter",         'S' },
+	{ "brightness",        "vo-brightness",     'S' },
+	{ "contrast",          "vo-contrast",       'S' },
+	{ "saturation",        "vo-colour",         'S' },
+	{ "hue",               "vo-hue",            'S' },
+	{ "ntsc_scaling",      "vo-scale-60hz",     'B' },
+	{ "cmp_colour_killer", "vo-colour-killer",  'B' },
+	{ "vdg_inverse",       "invert-text",       'B' },
+	{ "joy_right",         "joy-right",         'S' },
+	{ "joy_left",          "joy-left",          'S' },
+};
 
 int SDL_main(int argc, char **argv) {
 	// MainActivity sets XROAR_HOME to Android/media/<package>/, which file
@@ -153,6 +184,7 @@ int SDL_main(int argc, char **argv) {
 			__android_log_print(ANDROID_LOG_ERROR, "XRoar", "chdir %s: %s", dir, strerror(errno));
 		}
 		mkdir("roms", 0777);
+		mkdir("disks", 0777);
 		char path[1024];
 		snprintf(path, sizeof(path), "%s/xroar-log.txt", dir);
 		if (!freopen(path, "w", stderr)) {
@@ -171,51 +203,97 @@ int SDL_main(int argc, char **argv) {
 		__android_log_print(ANDROID_LOG_INFO, "XRoar", "data directory: %s", dir);
 	}
 
-	SDL_SetHint(SDL_HINT_ANDROID_TRAP_BACK_BUTTON, "1");
-	SDL_SetHint(SDL_HINT_ORIENTATIONS, "LandscapeLeft LandscapeRight Portrait");
-	SDL_AddEventWatch(keyboard_watch, NULL);
-
 	// argv from the Java side: argv[0] is "app_process"; anything after it
 	// (e.g. "-run /path/file.dsk") comes from MainActivity.getArguments().
-	char **args = calloc(argc + 10, sizeof(char *));
+	char **args = calloc((size_t)argc + 64, sizeof(char *));
 	int n = 0;
-	args[n++] = "xroar";
-	args[n++] = "-kbd-translate";
+	args[n++] = strdup("xroar");
+	args[n++] = strdup("-kbd-translate");
 
-	// CoCoSDC: SD card folder, and plug the cartridge in when it can work.
-	static char sdroot[1024];
+	char v[1024];
+
+	// Machine first: -ram and -tv-input apply to the machine chosen so far.
+	char machine[64] = "cocous";  // the build's default
+	if (setting("machine", v, sizeof(v)) && strcmp(v, "auto") != 0) {
+		snprintf(machine, sizeof(machine), "%.63s", v);
+		add(args, &n, "-machine", v);
+	}
+	if (setting("ram", v, sizeof(v)) && atoi(v) > 0) {
+		add(args, &n, "-ram", v);
+	}
+	if (setting("tv_input", v, sizeof(v)) && strcmp(v, "auto") != 0) {
+		add(args, &n, "-tv-input", v);
+	}
+
+	// CoCoSDC: SD card folder.
 	if (dir && !conf_has("sdc-root", NULL, 0)) {
 		mkdir("sdcard", 0777);
-		snprintf(sdroot, sizeof(sdroot), "%s/sdcard", dir);
-		args[n++] = "-sdc-root";
-		args[n++] = sdroot;
+		snprintf(v, sizeof(v), "%s/sdcard", dir);
+		add(args, &n, "-sdc-root", v);
 	}
-	// Machine: from xroar.conf, else the build's default (cocous).
-	char machine[64] = "";
-	conf_has("default-machine", machine, sizeof(machine));
-	if (!machine[0]) {
-		snprintf(machine, sizeof(machine), "cocous");
-	}
-	int sdcdos = rom_present(sdcdos_names);
+
+	// Cartridge.  "auto": a CoCoSDC when the SDC-DOS ROM is present, unless
+	// xroar.conf picks a cartridge itself.
+	char cart[32] = "auto";
+	setting("cart", cart, sizeof(cart));
+	int sdcdos = android_rom_present(android_sdcdos_names);
 	int user_cart = conf_has("machine-cart", NULL, 0);
-	fprintf(stderr, "android: machine '%s', sdcdos.rom %s, machine-cart in xroar.conf: %s\n",
-		machine, sdcdos ? "found" : "not found", user_cart ? "yes" : "no");
-	if (sdcdos && !user_cart) {
-		args[n++] = "-cart";
-		args[n++] = "cocosdc";
+	fprintf(stderr, "android: machine '%s', cart setting '%s', sdcdos.rom %s, machine-cart in xroar.conf: %s\n",
+		machine, cart, sdcdos ? "found" : "not found", user_cart ? "yes" : "no");
+	if (strcmp(cart, "auto") == 0) {
+		if (sdcdos && !user_cart) {
+			add(args, &n, "-cart", "cocosdc");
+		}
+	} else if (strcmp(cart, "none") == 0) {
+		add(args, &n, "-no-cart", NULL);
+	} else {
+		add(args, &n, "-cart", cart);
+	}
+
+	for (unsigned i = 0; i < sizeof(option_map) / sizeof(option_map[0]); i++) {
+		if (!setting(option_map[i].key, v, sizeof(v))) {
+			continue;
+		}
+		char flag[64];
+		if (option_map[i].kind == 'B') {
+			snprintf(flag, sizeof(flag), "%s%s", atoi(v) ? "-" : "-no-", option_map[i].flag);
+			add(args, &n, flag, NULL);
+		} else if (strcmp(v, "auto") != 0) {
+			snprintf(flag, sizeof(flag), "-%s", option_map[i].flag);
+			add(args, &n, flag, v);
+		}
+	}
+
+	// Sound: mute is the quietest gain the sound code accepts.
+	char gain[32];
+	int have_gain = setting("gain", gain, sizeof(gain));
+	if (setting("mute", v, sizeof(v)) && atoi(v)) {
+		add(args, &n, "-ao-gain", "-50");
+	} else if (have_gain) {
+		add(args, &n, "-ao-gain", gain);
 	}
 
 	for (int i = 1; i < argc; i++) {
-		// A disk image from "Open with" at start-up: hand it to the same
-		// code as a file opened later, so it reaches the CoCoSDC's drive
-		// 0 when one is plugged in (XRoar's -run only knows floppies).
-		if (strcmp(argv[i], "-run") == 0 && i + 1 < argc && is_disk_image(argv[i + 1])) {
-			queue_open(strdup(argv[i + 1]));
+		// "Open with" at start-up: the same code as a file opened later, so a
+		// disk image reaches the CoCoSDC's drive 0 when one is plugged in.
+		if (strcmp(argv[i], "-run") == 0 && i + 1 < argc) {
+			android_enqueue(OP_RUN, 0, 0, argv[i + 1]);
 			i++;
 			continue;
 		}
-		args[n++] = argv[i];
+		args[n++] = strdup(argv[i]);
 	}
+
+	// Disks the user left in the drives last time (inserted once XRoar is up).
+	for (int d = 0; d < 4; d++) {
+		char key[16];
+		snprintf(key, sizeof(key), "disk%d", d);
+		struct stat st;
+		if (setting(key, v, sizeof(v)) && stat(v, &st) == 0) {
+			android_enqueue(OP_DISK_INSERT, d, 0, v);
+		}
+	}
+
 	args[n] = NULL;
 	for (int i = 0; i < n; i++) {
 		fprintf(stderr, "arg[%d] = %s\n", i, args[i]);
@@ -224,111 +302,4 @@ int SDL_main(int argc, char **argv) {
 	fflush(stderr);
 	// Don't let SDLActivity re-enter XRoar in a stale process.
 	exit(r);
-}
-
-/* Files opened while XRoar is already running.
- *
- * MainActivity.onNewIntent() copies the file and calls nativeOpenFile() on
- * the Android UI thread.  sdl2/ui_sdl2.c is compiled with
- * -Dxroar_run=android_xroar_run, so the emulator thread picks the path up
- * between time slices and loads it there, where XRoar expects to be called.
- */
-
-#include <jni.h>
-#include <stdatomic.h>
-#include <limits.h>
-
-#include "top-config.h"
-#include "auto_kbd.h"
-#include "cart.h"
-#include "cocosdc.h"
-#include "machine.h"
-#include "xroar.h"
-
-static _Atomic(char *) pending_file = NULL;
-
-static void queue_open(char *path) {
-	char *old = atomic_exchange(&pending_file, path);
-	free(old);
-}
-
-static int copy_file(const char *src, const char *dst) {
-	FILE *in = fopen(src, "rb");
-	if (!in) return -1;
-	FILE *out = fopen(dst, "wb");
-	if (!out) { fclose(in); return -1; }
-	char buf[65536];
-	size_t got;
-	int r = 0;
-	while ((got = fread(buf, 1, sizeof(buf), in)) > 0) {
-		if (fwrite(buf, 1, got, out) != got) { r = -1; break; }
-	}
-	if (ferror(in)) r = -1;
-	fclose(in);
-	if (fclose(out) != 0) r = -1;
-	return r;
-}
-
-/* Open a file on the emulator thread.  With a CoCoSDC plugged in, a disk
- * image goes onto the SD card (copied into OPENED/ unless it is already on
- * the card) and is mounted as SDC drive 0; then "DOS" is typed, as XRoar
- * does for a floppy.  Everything else, and any failure, takes XRoar's own
- * path (floppy drive 0, tape, cartridge, binary). */
-static void android_open(const char *path) {
-	struct cart *c = NULL;
-	if (xroar.machine && xroar.machine->get_interface) {
-		c = xroar.machine->get_interface(xroar.machine, "cart");
-	}
-	const char *root = cocosdc_sd_root(c);
-	if (root && is_disk_image(path)) {
-		char dest[PATH_MAX];
-		size_t rl = strlen(root);
-		int ok = 1;
-		if (strncmp(path, root, rl) == 0 && path[rl] == '/') {
-			snprintf(dest, sizeof(dest), "%s", path);
-		} else {
-			const char *base = strrchr(path, '/');
-			base = base ? base + 1 : path;
-			char odir[PATH_MAX];
-			snprintf(odir, sizeof(odir), "%s/OPENED", root);
-			mkdir(odir, 0777);
-			if (snprintf(dest, sizeof(dest), "%s/%s", odir, base) >= (int)sizeof(dest)
-			    || copy_file(path, dest) != 0) {
-				fprintf(stderr, "android: could not copy %s to the SD card\n", path);
-				ok = 0;
-			}
-		}
-		if (ok) {
-			int err = cocosdc_mount_host(c, 0, dest);
-			if (err == 0) {
-				fprintf(stderr, "android: CoCoSDC drive 0 = %s\n", dest);
-				ak_parse_type_string(xroar.auto_kbd, "\\025DOS\\r");
-				return;
-			}
-			fprintf(stderr, "android: CoCoSDC mount of %s failed (%d); using a floppy drive\n", dest, err);
-		}
-	}
-	xroar_load_file_by_type(path, 1);
-}
-
-JNIEXPORT void JNICALL
-Java_io_github_carloscamacho_xroar_MainActivity_nativeOpenFile(JNIEnv *env, jclass cls, jstring jpath) {
-	(void)cls;
-	const char *p = (*env)->GetStringUTFChars(env, jpath, NULL);
-	if (!p) {
-		return;
-	}
-	char *copy = strdup(p);
-	(*env)->ReleaseStringUTFChars(env, jpath, p);
-	queue_open(copy);
-}
-
-void android_xroar_run(int ncycles) {
-	char *path = atomic_exchange(&pending_file, NULL);
-	if (path) {
-		fprintf(stderr, "opening %s\n", path);
-		android_open(path);
-		free(path);
-	}
-	xroar_run(ncycles);
 }

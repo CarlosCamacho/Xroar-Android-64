@@ -147,12 +147,14 @@ for ABI in $ABIS; do
 	rm -f "$B/src/xroar-main_unix.o" "$B/src/sdl2/xroar-ui_sdl2.o"
 	make -C "$B/src" xroar-main_unix.o CFLAGS="-O2 -fPIC -Dmain=xroar_unix_main" >> "$LOG/make.log" 2>&1
 	make -C "$B/src" sdl2/xroar-ui_sdl2.o CFLAGS="-O2 -fPIC -Dxroar_run=android_xroar_run" >> "$LOG/make.log" 2>&1
-	"$CC" -O2 -fPIC -Wall \
-		-I"$PREFIX/include/SDL2" -I"$B" -I"$SRC/xroar" -I"$SRC/xroar/src" -I"$SRC/xroar/portalib" \
-		-DHAVE_CONFIG_H -D_REENTRANT -DSDL_MAIN_HANDLED \
-		-c "$HERE/android/glue/android_main.c" -o "$B/android_glue.o"
+	for f in "$HERE"/android/glue/*.c; do
+		"$CC" -O2 -fPIC -Wall \
+			-I"$PREFIX/include/SDL2" -I"$B" -I"$SRC/xroar" -I"$SRC/xroar/src" -I"$SRC/xroar/portalib" \
+			-I"$HERE/android/glue" -DHAVE_CONFIG_H -D_REENTRANT -DSDL_MAIN_HANDLED \
+			-c "$f" -o "$B/glue-$(basename "$f" .c).o"
+	done
 	"$CC" -shared -o "$B/libmain.so" $(cd "$B" && find src -name 'xroar-*.o' | sort | sed "s|^|$B/|") \
-		"$B/android_glue.o" "$B/portalib/libporta.a" \
+		"$B"/glue-*.o "$B/portalib/libporta.a" \
 		-L"$PREFIX/lib" -lSDL2 -lz -lm -llog -landroid \
 		-Wl,-z,max-page-size=16384 -Wl,--no-undefined -Wl,-soname,libmain.so
 	"$TC/llvm-strip" --strip-unneeded "$B/libmain.so"

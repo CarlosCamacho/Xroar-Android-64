@@ -1,0 +1,73 @@
+From 147c602f5df8bf2523a1a8b3bf82cf246eeaeda0 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sat, 7 Nov 2026 18:09:50 +0000
+Subject: [PATCH] CoCoSDC: add an eject hook for the Android front end
+
+cocosdc_eject() / sdc_fs_eject() empty SDC drive 0 or 1, as an M: with no path
+does, so the app's disk menu can eject.
+---
+ src/cocosdc.c    | 8 ++++++++
+ src/cocosdc.h    | 3 +++
+ src/cocosdc_fs.c | 6 ++++++
+ src/cocosdc_fs.h | 3 +++
+ 4 files changed, 20 insertions(+)
+
+diff --git a/src/cocosdc.c b/src/cocosdc.c
+index f842fcf3..229a446f 100644
+--- a/src/cocosdc.c
++++ b/src/cocosdc.c
+@@ -765,3 +765,11 @@ int cocosdc_mount_host(struct cart *c, unsigned drive, const char *host_path) {
+ 	struct cocosdc *sdc = (struct cocosdc *)c;
+ 	return sdc_fs_mount_host(&sdc->fs, drive, host_path);
+ }
++
++void cocosdc_eject(struct cart *c, unsigned drive) {
++	if (!c || !part_is_a(&c->part, "cocosdc")) {
++		return;
++	}
++	struct cocosdc *sdc = (struct cocosdc *)c;
++	sdc_fs_eject(&sdc->fs, drive);
++}
+diff --git a/src/cocosdc.h b/src/cocosdc.h
+index c7102206..d7d3db26 100644
+--- a/src/cocosdc.h
++++ b/src/cocosdc.h
+@@ -16,4 +16,7 @@ const char *cocosdc_sd_root(struct cart *c);
+ // Returns 0 on success, -1 if c is not a CoCoSDC, else an SDC_ERR_* code.
+ int cocosdc_mount_host(struct cart *c, unsigned drive, const char *host_path);
+ 
++// Empty SDC drive 0 or 1.  No-op if c is not a CoCoSDC.
++void cocosdc_eject(struct cart *c, unsigned drive);
++
+ #endif
+diff --git a/src/cocosdc_fs.c b/src/cocosdc_fs.c
+index 9725b387..b2d60787 100644
+--- a/src/cocosdc_fs.c
++++ b/src/cocosdc_fs.c
+@@ -1574,3 +1574,9 @@ int sdc_fs_mount_host(struct sdc_fs *fs, unsigned drive, const char *host_path)
+ 	/* "/rest/of/path": absolute from the SD root, not the current dir. */
+ 	return fs_mount_path(fs, drive, 'M', host_path + n, NULL);
+ }
++
++void sdc_fs_eject(struct sdc_fs *fs, unsigned drive) {
++	if (fs && drive < SDC_SLOTS) {
++		slot_close(&fs->slot[drive]);
++	}
++}
+diff --git a/src/cocosdc_fs.h b/src/cocosdc_fs.h
+index d77d80ed..a74b8638 100644
+--- a/src/cocosdc_fs.h
++++ b/src/cocosdc_fs.h
+@@ -108,6 +108,9 @@ int sdc_fs_apply_startup(struct sdc_fs *fs);
+  * does.  Returns 0, or SDC_ERR_INVALID if host_path is outside the root. */
+ int sdc_fs_mount_host(struct sdc_fs *fs, unsigned drive, const char *host_path);
+ 
++/* Front-end hook: empty drive 0 or 1 (like an M: with no path). */
++void sdc_fs_eject(struct sdc_fs *fs, unsigned drive);
++
+ /* Human-readable SDC_ERR_* / apply_startup result for logs. */
+ const char *sdc_fs_err_name(int err);
+ 
+-- 
+2.43.0
+

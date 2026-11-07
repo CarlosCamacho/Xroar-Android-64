@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+- **Android front end.** CoCo on-screen keyboard (sticky SHIFT, BREAK, CLEAR,
+  arrows), on-screen joystick pad, Type... dialog using the phone's own keyboard,
+  toolbar (Keys, Pad, Type, Reset, Menu), and a settings screen modelled on
+  XRoar Online (Machine, Video, Audio, Input, Files). Settings apply live and are
+  saved in `settings.conf`. Disk, tape and program files come from Android's file
+  picker. versionCode 5.
+- Native control layer (`android_control.c`): commands queued from the UI and run
+  on the emulator thread; a message channel so the app can tell the user what
+  happened (a disk mounted, "already in the other SD drive"); a display-size
+  check that logs what the renderer reports.
+- CoCoSDC drive eject hook (patch 0003). A disk that fails to mount on an SD
+  drive no longer falls back to a floppy drive.
+- `tools/hosttest/run.sh`: a desktop test suite for the glue (see README).
+
 - **CoCo 1/2 only.** CoCo 3 and MC-10 are configured out; patch 0002 removes the
   Dragon machines and the DragonDOS and Delta carts, and makes `cocous` the
   default. The `coco3.rom` / machine auto-selection is gone. versionCode 4.
@@ -14,6 +28,24 @@
 
 ### Learned
 
+- [SIM] XRoar's virtual cassette output file is closed by a reset, so a test that
+  reads BASIC's output from `-tape-write` fails after any reset and looks like
+  broken typing. The printer (`-lp-file`, `PRINT #-2`) survives resets and
+  machine rebuilds.
+- [SIM] XRoar rebuilds the whole machine from its config whenever it is told to
+  select a machine (`ui_tag_machine`), so a live RAM change works by setting
+  `mc->ram`, resetting `mc->ram_org` to auto (else it keeps the 64K chip layout
+  and builds 0K), and selecting the same machine again. That also drops the
+  cartridge, so the app re-sends its cartridge setting.
+- [SIM] A sticky SHIFT needs a guard: its release must wait for the pending
+  release of the key typed with it, or the key can be seen unshifted for a few
+  frames. A test where SHIFT had only just been pressed passed without the guard
+  (SHIFT's own minimum hold covered it) and proved nothing; the test has to
+  latch SHIFT first.
+- [SRC] XRoar's `-ccr`, `-vo-picture`, `-vo-colour`, `-invert-text` and
+  `-vo-scale-60hz` are the option names for the web UI's Renderer, Picture,
+  Color, Inverse text and 60Hz scaling; `-no-cart` is `-cart` with its argument
+  inverted; muting is `-ao-gain -50` (the sound code treats below -49.9 as zero).
 - [HW] Android 11+ gives file managers "Access denied" on `Android/data/<pkg>/`
   (reported on the owner's phone). `Android/media/<pkg>/` is writable by file
   managers and by the app, with no permission, via `getExternalMediaDirs()`.
