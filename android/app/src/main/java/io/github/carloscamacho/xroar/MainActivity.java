@@ -3,8 +3,11 @@ package io.github.carloscamacho.xroar;
 import android.content.Intent;
 import android.database.Cursor;
 import android.net.Uri;
+import android.os.Bundle;
 import android.provider.OpenableColumns;
 import android.util.Log;
+
+import android.system.Os;
 
 import java.io.File;
 import java.io.FileOutputStream;
@@ -17,11 +20,39 @@ import org.libsdl.app.SDLActivity;
  * (android_main.c) that sets HOME to this app's external files directory.
  *
  * If the activity was started by "Open with XRoar", the file is copied into
- * files/opened/ (content:// URIs have no usable path for native code) and
+ * opened/ (content:// URIs have no usable path for native code) and
  * passed to XRoar as "-run <path>", which attaches it and tries to autorun.
  */
 public class MainActivity extends SDLActivity {
     private static final String TAG = "XRoar";
+
+    /* The app's folder for ROMs, xroar.conf, the SD card and the log:
+     * Android/media/<package>/.  File managers can write there on Android 11+,
+     * unlike Android/data/<package>/.  Falls back to the files directory. */
+    private File homeDir() {
+        File[] media = getExternalMediaDirs();
+        if (media != null) {
+            for (File d : media) {
+                if (d != null && (d.isDirectory() || d.mkdirs())) {
+                    return d;
+                }
+            }
+        }
+        File d = getExternalFilesDir(null);
+        return d != null ? d : getFilesDir();
+    }
+
+    @Override
+    protected void onCreate(Bundle savedInstanceState) {
+        // Before super: SDLActivity starts the native thread later, and
+        // android_main.c reads XROAR_HOME when it starts.
+        try {
+            Os.setenv("XROAR_HOME", homeDir().getAbsolutePath(), true);
+        } catch (Exception e) {
+            Log.e(TAG, "can't set XROAR_HOME", e);
+        }
+        super.onCreate(savedInstanceState);
+    }
 
     @Override
     protected String[] getLibraries() {
@@ -67,11 +98,7 @@ public class MainActivity extends SDLActivity {
             name = "opened.bin";
         }
         name = name.replaceAll("[/\\\\:]", "_");
-        File base = getExternalFilesDir(null);
-        if (base == null) {
-            base = getFilesDir();
-        }
-        File dir = new File(base, "opened");
+        File dir = new File(homeDir(), "opened");
         dir.mkdirs();
         File out = new File(dir, name);
         try (InputStream in = getContentResolver().openInputStream(uri);

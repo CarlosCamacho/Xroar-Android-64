@@ -22,19 +22,28 @@ revisions.
 
 ## Using it on a phone
 
-On first launch the app creates `Android/data/io.github.carloscamacho.xroar/files/`:
+Everything lives in `Android/media/io.github.carloscamacho.xroar/`, which the app
+creates on first launch. (Not `Android/data/`: Android 11 and later stop file
+managers writing there, but `Android/media/<package>/` stays open to them.)
 
 | Path | What it is |
 |---|---|
-| `roms/` | ROM images (`coco3.rom`, `disk11.rom`, `sdcdos.rom`, ...); the files folder itself is searched too |
-| `xroar.conf` | Starter config: CoCo 3, touch as the right joystick; documents the CoCoSDC options |
+| `roms/` | ROM images (`coco3.rom`, `bas13.rom`, `extbas11.rom`, `disk11.rom`, `sdcdos.rom`, ...); the folder itself is searched too |
+| `xroar.conf` | Starter config: touch as the right joystick; documents the machine and CoCoSDC options |
 | `sdcard/` | The CoCoSDC's SD card: `.DSK` images, optional `STARTUP.CFG` (`0=GAME.DSK`) |
 | `xroar-log.txt` | Everything XRoar printed this run; send it with any bug report |
 | `opened/` | Copies of files opened with "Open with XRoar" |
 
-Android 11 and later keep most file managers out of `Android/data`, so copy
-files there from a computer over USB, or use
-`adb push FILE /sdcard/Android/data/io.github.carloscamacho.xroar/files/roms/`.
+Copy ROMs there with any file manager that can reach `Android/media`, from a
+computer over USB, or with
+`adb push FILE /sdcard/Android/media/io.github.carloscamacho.xroar/roms/`.
+Launch the app once first so the folder exists, then restart it after adding files.
+
+**Which machine starts.** If `xroar.conf` has no `default-machine` line, the app
+looks at the ROMs: `coco3.rom` gives a CoCo 3 (`coco3`); otherwise `bas13.rom`
+(or `bas12`/`bas11`/`bas10`) gives an NTSC CoCo 1/2 (`cocous`), which also uses
+`extbas11.rom` and, as the disk cartridge, `disk11.rom`. Set `default-machine`
+in `xroar.conf` to override. CoCoTosh needs a CoCo 3, so it needs `coco3.rom`.
 
 - **Back button** shows or hides the on-screen keyboard. A Bluetooth keyboard
   gives you BREAK, CLEAR and XRoar's shortcut keys.
@@ -79,7 +88,8 @@ with one key cannot be installed over one signed with another; uninstall first.
 ### How the port works
 
 - `android/glue/android_main.c` is `SDL_main()`. It sets `HOME` and the working
-  directory to the app's files folder, redirects the log, writes the starter
+  directory to the `Android/media/<package>/` folder that `MainActivity` passes
+  in `XROAR_HOME`, redirects the log, writes the starter
   config, adds `-sdc-root` and `-cart cocosdc` when they apply, and maps Back
   to the on-screen keyboard.
 - `build.sh` compiles XRoar unchanged apart from the patch, then rebuilds two
@@ -87,11 +97,13 @@ with one key cannot be installed over one signed with another; uninstall first.
   `sdl2/ui_sdl2.c` with `-Dxroar_run=android_xroar_run`. That second hook lets
   a file opened while XRoar runs be loaded on the emulator thread.
 - `MainActivity.java` loads `libSDL2.so` and `libmain.so`, copies a
-  `content://` file to a real path, and passes it to native code.
+  `content://` file into `opened/`, and passes it to native code.
 - Build-time settings, each forced by Android:
   - minSdk 24, for bionic's complex-math functions and 32-bit `fseeko`.
   - The GDB target is off, because Android has no `pthread_cancel`.
   - `SDL_MAIN_HANDLED` is set, so SDL doesn't rename `main()`.
+  - The data folder is `Android/media/<package>/`, not `Android/data/`, so
+    file managers can write to it on Android 11+.
   - ROMPATH/CONFPATH are rewritten to `~/roms:~/.` and `~/.`, because XRoar only expands `~/`.
 
 ## Testing status
@@ -107,6 +119,12 @@ harness, **[SRC]** read from source.
   search paths, starting as a CoCo 3, `-run` at start-up, and a disk opened
   while running. One bug was found that way and fixed (the bare `~` path
   entries above).
+- [SIM] After the move to `Android/media`: with placeholder ROMs named
+  `bas13`, `extbas11`, `disk11` the harness starts a `cocous` machine, loads all
+  three, and with `sdcdos.rom` added plugs in the CoCoSDC; a `coco3.rom`
+  selects `coco3`; a `default-machine` line in `xroar.conf` wins. The Java
+  side (`getExternalMediaDirs`, `XROAR_HOME`) is **not** exercised by the
+  harness.
 - [SRC] The CoCoSDC code was reviewed but **has not been executed**. Paths stay
   inside the SD folder, buffers are bounded, and there is no networking except
   an opt-in Becker port. The fork's own test programs are included in the patch

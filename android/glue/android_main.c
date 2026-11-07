@@ -35,12 +35,14 @@ extern int xroar_unix_main(int argc, char **argv);
 static const char *starter_conf =
 "# XRoar configuration (Android build)\n"
 "#\n"
-"# This file lives in Android/data/<this app>/files/ on your phone.\n"
-"# Put ROM images in the same folder, or in its roms/ subfolder.\n"
+"# This file lives in Android/media/io.github.carloscamacho.xroar/ on your\n"
+"# phone.  Put ROM images in the same folder, or in its roms/ subfolder.\n"
 "# Full option list: https://www.6809.org.uk/xroar/doc/xroar.shtml\n"
 "\n"
-"# Start as a CoCo 3 (other choices: coco, cocous, coco2b, dragon64, ...)\n"
-"default-machine coco3\n"
+"# Which machine to start.  If this is not set, the app picks one from the\n"
+"# ROMs it finds: coco3.rom -> coco3, else bas13.rom (etc.) -> cocous.\n"
+"# Choices: coco3, cocous (NTSC CoCo 1/2), coco (PAL), coco2bus, dragon64, ...\n"
+"# default-machine coco3\n"
 "\n"
 "# Touching the screen moves the right joystick; touch = fire button.\n"
 "joy-right mjoy0\n"
@@ -94,16 +96,16 @@ static int conf_has(const char *key, char *value, size_t valuesz) {
 	return found;
 }
 
-/* Is an SDC-DOS ROM image where XRoar's ROM path ("~/roms:~/.") will find
- * it under the romlist names "sdcdos,sdc-dos,sdc_dos,SDCDOS"? */
-static int sdcdos_present(void) {
+/* Is any of these ROM images (NULL-terminated list of base names) where
+ * XRoar's ROM path ("~/roms:~/.") will find it?  XRoar tries NAME.rom,
+ * NAME.ROM and NAME. */
+static int rom_present(const char *const *names) {
 	static const char *dirs[] = { "roms/", "" };
-	static const char *names[] = { "sdcdos", "sdc-dos", "sdc_dos", "SDCDOS" };
 	static const char *exts[] = { ".rom", ".ROM", "" };
 	char p[256];
 	struct stat st;
 	for (unsigned d = 0; d < 2; d++)
-		for (unsigned n = 0; n < 4; n++)
+		for (unsigned n = 0; names[n]; n++)
 			for (unsigned e = 0; e < 3; e++) {
 				snprintf(p, sizeof(p), "%s%s%s", dirs[d], names[n], exts[e]);
 				if (stat(p, &st) == 0 && S_ISREG(st.st_mode)) {
@@ -112,6 +114,10 @@ static int sdcdos_present(void) {
 			}
 	return 0;
 }
+
+static const char *const sdcdos_names[] = { "sdcdos", "sdc-dos", "sdc_dos", "SDCDOS", NULL };
+static const char *const coco3_names[] = { "coco3", NULL };
+static const char *const cocobas_names[] = { "bas13", "bas12", "bas11", "bas10", NULL };
 
 static int is_disk_image(const char *path) {
 	const char *dot = strrchr(path, '.');
@@ -135,7 +141,12 @@ static int keyboard_watch(void *userdata, SDL_Event *event) {
 }
 
 int SDL_main(int argc, char **argv) {
-	const char *dir = SDL_AndroidGetExternalStoragePath();
+	// MainActivity sets XROAR_HOME to Android/media/<package>/, which file
+	// managers can write to.  Android 11+ keeps them out of Android/data/.
+	const char *dir = getenv("XROAR_HOME");
+	if (!dir || !dir[0]) {
+		dir = SDL_AndroidGetExternalStoragePath();
+	}
 	if (!dir) {
 		dir = SDL_AndroidGetInternalStoragePath();
 	}
@@ -169,7 +180,7 @@ int SDL_main(int argc, char **argv) {
 
 	// argv from the Java side: argv[0] is "app_process"; anything after it
 	// (e.g. "-run /path/file.dsk") comes from MainActivity.getArguments().
-	char **args = calloc(argc + 8, sizeof(char *));
+	char **args = calloc(argc + 10, sizeof(char *));
 	int n = 0;
 	args[n++] = "xroar";
 	args[n++] = "-kbd-translate";
@@ -184,10 +195,18 @@ int SDL_main(int argc, char **argv) {
 	}
 	char machine[64] = "";
 	conf_has("default-machine", machine, sizeof(machine));
+	if (!machine[0]) {
+		// Not chosen in xroar.conf: pick what the ROMs in the folder can run.
+		snprintf(machine, sizeof(machine), "%s",
+			 rom_present(coco3_names) ? "coco3" :
+			 rom_present(cocobas_names) ? "cocous" : "coco3");
+		args[n++] = "-default-machine";
+		args[n++] = machine;
+	}
 	int coco = strncmp(machine, "coco", 4) == 0;
-	int sdcdos = sdcdos_present();
+	int sdcdos = rom_present(sdcdos_names);
 	int user_cart = conf_has("machine-cart", NULL, 0);
-	fprintf(stderr, "android: default-machine '%s', sdcdos.rom %s, machine-cart in xroar.conf: %s\n",
+	fprintf(stderr, "android: machine '%s', sdcdos.rom %s, machine-cart in xroar.conf: %s\n",
 		machine, sdcdos ? "found" : "not found", user_cart ? "yes" : "no");
 	if (coco && sdcdos && !user_cart) {
 		args[n++] = "-cart";
