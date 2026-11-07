@@ -104,6 +104,15 @@ static void rapid_shifted(int k) {
 	usleep(300000);
 }
 
+static void bp_hit(void *sptr, bool RnW, uint32_t A) {
+	(void)sptr;
+	(void)RnW;
+	static unsigned hits;
+	if (hits++ < 20) {
+		fprintf(stderr, "hosttest: 6809 executed $%04X\n", (unsigned)A);
+	}
+}
+
 static void *scenario(void *arg) {
 	const char *name = arg;
 	sleep(4);  // boot
@@ -268,6 +277,15 @@ static void *scenario(void *arg) {
 		sleep(2);
 	}
 	if (!strcmp(name, "emes")) {
+		// EMES_BP="0103,C000": log each time the 6809 executes one of these addresses
+		if (getenv("EMES_BP") && xroar.machine && xroar.machine->debug.add_breakpoint) {
+			char *list = strdup(getenv("EMES_BP"));
+			for (char *t = strtok(list, ","); t; t = strtok(NULL, ",")) {
+				machine_add_breakpoint(xroar.machine, (uint32_t)strtoul(t, NULL, 16),
+					DELEGATE_AS2(void, bool, uint32, bp_hit, NULL));
+			}
+			free(list);
+		}
 		if (getenv("EMES_ROM") && *getenv("EMES_ROM")) {
 			cmd(OP_RUN, 0, 0, getenv("EMES_ROM"));
 			sleep(2);

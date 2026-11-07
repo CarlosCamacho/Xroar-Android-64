@@ -28,6 +28,12 @@
   vectors into the `E9RV` data at `$0103`, and `NEG <$40...` with DP=$FF writes the
   `$FF4x` registers). It is a ROM bug, not the cartridge; a ROM with #3 fixed is
   needed to go further.
+- [SIM] ~~That matches #3~~ Confirmed at the CPU, not just matched: with a
+  breakpoint (`EMES_BP=0103` in `tools/hosttest`), the 6809 executes `$0103` right
+  after the last good controller command (LED off), and every garbage command comes
+  after it. Fixing #3 alone would not be enough: the next step stages `COMMAND.D9`
+  at `$E000` (emesDOS09 issue #4), which reads back as cartridge ROM on this
+  cartridge too, since the SAM's TY bit is never set.
 - [SIM] The firmware model reports version 0.17.0; the rc2 ROM prints "CTRL UNKNOWN"
   for anything but 0.11.0. That is cosmetic: it accepts protocol 2.2.
 - [SRC] The firmware's `command_dir_open` copies 8 bytes from the 7-byte literal
