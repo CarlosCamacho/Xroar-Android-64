@@ -20,7 +20,8 @@ final class RomManager {
         BASIC("Color BASIC", "BASIC", new String[] { "bas13", "bas12", "bas11", "bas10" }, "bas13", true),
         EXT("Extended BASIC", "EXT", new String[] { "extbas11", "extbas10" }, "extbas11", true),
         DOS("Disk controller (DOS)", "DOS", new String[] { "disk11", "disk10" }, "disk11", true),
-        SDC("SDC-DOS (CoCoSDC)", "SDC", new String[] { "sdcdos", "sdc-dos", "sdc_dos" }, "sdcdos", false);
+        SDC("SDC-DOS (CoCoSDC)", "SDC", new String[] { "sdcdos", "sdc-dos", "sdc_dos" }, "sdcdos", false),
+        EMES("emesDOS09 cartridge ROM (16K)", "EMES", new String[] { "emesdos09" }, "emesdos09", false);
 
         final String title;
         final String kind;           // matches RomCatalog.Entry.kind (SDC has no catalog entry)
@@ -110,7 +111,7 @@ final class RomManager {
         } catch (Exception e) {
             what = "unreadable";
         }
-        return slot == Slot.SDC && what.startsWith("unrecognised") ? f.getName() : what + "  —  " + f.getName();
+        return (slot == Slot.SDC || slot == Slot.EMES) && what.startsWith("unrecognised") ? f.getName() : what + "  —  " + f.getName();
     }
 
     /* Delete every file for this slot.  Returns how many were removed. */

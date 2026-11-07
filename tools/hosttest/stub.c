@@ -17,6 +17,9 @@
  *   pak     insert a cartridge (a tiny program Pak), see it start, eject, read $C000
  *   sdcdisk disk insert/eject with a CoCoSDC plugged in
  *   misc    live settings, resets, tape and disk commands; no output check
+ *   emes    the emesDOS09 cartridge: optionally "tap" $EMES_ROM as a Pak and/or
+ *           insert $EMES_IMG live, wait $EMES_WAIT s, then write the CoCo's
+ *           text screen ($0400-$05FF) to $SCREEN_OUT; $EMES_KEYS is typed after
  * Each BASIC line writes a marker to the emulated printer (-lp-file), so
  * the shell script can check what the CoCo really saw.
  *
@@ -32,7 +35,10 @@
 #include <string.h>
 #include <unistd.h>
 
+#include "top-config.h"
 #include "android_glue.h"
+#include "machine.h"
+#include "xroar.h"
 
 const char *SDL_AndroidGetExternalStoragePath(void) { return getenv("FAKE_EXT"); }
 const char *SDL_AndroidGetInternalStoragePath(void) { return NULL; }
@@ -260,6 +266,33 @@ static void *scenario(void *arg) {
 		cmd(OP_TAPE_EJECT, 0, 0, NULL);
 		cmd(OP_HARD_RESET, 0, 0, NULL);
 		sleep(2);
+	}
+	if (!strcmp(name, "emes")) {
+		if (getenv("EMES_ROM") && *getenv("EMES_ROM")) {
+			cmd(OP_RUN, 0, 0, getenv("EMES_ROM"));
+			sleep(2);
+		}
+		if (getenv("EMES_IMG") && *getenv("EMES_IMG")) {
+			char kv[1100];
+			snprintf(kv, sizeof(kv), "emes_image=%s", getenv("EMES_IMG"));
+			cmd(OP_SET, 0, 0, kv);
+			sleep(1);
+			cmd(OP_HARD_RESET, 0, 0, NULL);
+		}
+		sleep(getenv("EMES_WAIT") ? atoi(getenv("EMES_WAIT")) : 6);
+		if (getenv("EMES_KEYS")) {
+			cmd(OP_TYPE, 0, 0, getenv("EMES_KEYS"));
+			sleep(getenv("EMES_WAIT2") ? atoi(getenv("EMES_WAIT2")) : 5);
+		}
+		FILE *f = getenv("SCREEN_OUT") ? fopen(getenv("SCREEN_OUT"), "wb") : NULL;
+		if (f && xroar.machine) {
+			for (unsigned a = 0x400; a < 0x600; a++) {
+				fputc(xroar.machine->read_byte(xroar.machine, a, 0), f);
+			}
+		}
+		if (f) {
+			fclose(f);
+		}
 	}
 	sleep(getenv("TAIL") ? atoi(getenv("TAIL")) : 6);
 	SDL_Event q = { .type = SDL_QUIT };

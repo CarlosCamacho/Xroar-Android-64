@@ -1,0 +1,3768 @@
+From c7de4e1e8d8b74e83de322522e05b577563a764f Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sat, 7 Nov 2026 22:28:48 +0000
+Subject: [PATCH] emesDOS09 smart cartridge
+
+Banked 16K ROM at $C000 (bit 7 of $FF40 selects the bank) and the SD
+controller at $FF40-$FF4F, driven by the emesDOS09 PIC32 firmware's own
+command code (src/emesdos09/, MIT, from CarlosCamacho/EmEsDOS09 a41c25a).
+The SD card is hard disk 0 (-load-hd0), a raw FAT16 image.
+---
+ src/Makefile.am                     |   10 +
+ src/emesdos09.c                     |  272 ++++++++
+ src/emesdos09/LICENSE.MIT           |   50 ++
+ src/emesdos09/coco_image.c          |  284 ++++++++
+ src/emesdos09/coco_image.h          |   86 +++
+ src/emesdos09/controller_protocol.h |  174 +++++
+ src/emesdos09/emes_fw.c             | 1010 +++++++++++++++++++++++++++
+ src/emesdos09/emes_fw.h             |   20 +
+ src/emesdos09/fat16_check.c         |  137 ++++
+ src/emesdos09/fat16_check.h         |   56 ++
+ src/emesdos09/fat16_meta.c          |  134 ++++
+ src/emesdos09/fat16_meta.h          |   69 ++
+ src/emesdos09/fat16_ro.c            |  505 ++++++++++++++
+ src/emesdos09/fat16_ro.h            |  126 ++++
+ src/emesdos09/fat16_rw.c            |  280 ++++++++
+ src/emesdos09/fat16_rw.h            |   77 ++
+ src/emesdos09/ide_image.c           |   70 ++
+ src/emesdos09/ide_image.h           |   28 +
+ src/emesdos09/partition_fat.c       |   82 +++
+ src/emesdos09/partition_fat.h       |   52 ++
+ src/part.c                          |    2 +
+ src/xroar.c                         |   14 +
+ src/xroar.h                         |    1 +
+ 23 files changed, 3539 insertions(+)
+ create mode 100644 src/emesdos09.c
+ create mode 100644 src/emesdos09/LICENSE.MIT
+ create mode 100644 src/emesdos09/coco_image.c
+ create mode 100644 src/emesdos09/coco_image.h
+ create mode 100644 src/emesdos09/controller_protocol.h
+ create mode 100644 src/emesdos09/emes_fw.c
+ create mode 100644 src/emesdos09/emes_fw.h
+ create mode 100644 src/emesdos09/fat16_check.c
+ create mode 100644 src/emesdos09/fat16_check.h
+ create mode 100644 src/emesdos09/fat16_meta.c
+ create mode 100644 src/emesdos09/fat16_meta.h
+ create mode 100644 src/emesdos09/fat16_ro.c
+ create mode 100644 src/emesdos09/fat16_ro.h
+ create mode 100644 src/emesdos09/fat16_rw.c
+ create mode 100644 src/emesdos09/fat16_rw.h
+ create mode 100644 src/emesdos09/ide_image.c
+ create mode 100644 src/emesdos09/ide_image.h
+ create mode 100644 src/emesdos09/partition_fat.c
+ create mode 100644 src/emesdos09/partition_fat.h
+
+diff --git a/src/Makefile.am b/src/Makefile.am
+index 520e53f8..4d368094 100644
+--- a/src/Makefile.am
++++ b/src/Makefile.am
+@@ -140,6 +140,16 @@ xroar_SOURCES += \
+ 	spi_sdcard.c \
+ 	cocosdc.c cocosdc.h cocosdc_hw.h \
+ 	cocoxsid.c \
++	emesdos09.c \
++	emesdos09/emes_fw.c emesdos09/emes_fw.h \
++	emesdos09/controller_protocol.h \
++	emesdos09/coco_image.c emesdos09/coco_image.h \
++	emesdos09/fat16_check.c emesdos09/fat16_check.h \
++	emesdos09/fat16_meta.c emesdos09/fat16_meta.h \
++	emesdos09/fat16_ro.c emesdos09/fat16_ro.h \
++	emesdos09/fat16_rw.c emesdos09/fat16_rw.h \
++	emesdos09/ide_image.c emesdos09/ide_image.h \
++	emesdos09/partition_fat.c emesdos09/partition_fat.h \
+ 	sid.c sid.h \
+ 	cocosdc_fs.c cocosdc_fs.h \
+ 	cocosdc_fdc.c cocosdc_fdc.h \
+diff --git a/src/emesdos09.c b/src/emesdos09.c
+new file mode 100644
+index 00000000..624dc915
+--- /dev/null
++++ b/src/emesdos09.c
+@@ -0,0 +1,272 @@
++/* emesDOS09 smart cartridge: a 16K ROM in two banks plus an SD controller.
++ *
++ * Copyright 2026
++ *
++ * This file is part of XRoar, a Dragon/Tandy CoCo emulator.
++ *
++ * XRoar is free software; you can redistribute it and/or modify it under the
++ * terms of the GNU General Public License as published by the Free Software
++ * Foundation, either version 3 of the License, or (at your option) any later
++ * version.
++ *
++ * See COPYING.GPL for redistribution conditions.
++ */
++
++/* The cartridge of Carlos Camacho's emesDOS09 (github.com/CarlosCamacho/
++ * EmEsDOS09), as its EMULATOR-CONTRACT.md describes it:
++ *
++ *   $C000-$DFFF  the selected 8K bank of the 16K ROM (bank 0 then bank 1)
++ *   $FF40        bit 7 selects the bank; bits 0-6, if not zero, run a command
++ *   $FF41-$FF4F  status, FIFO, error, arguments, count, capabilities, ack
++ *
++ * The controller behind the registers is the project's own PIC32 firmware
++ * command code (emesdos09/emes_fw.c), with the SD card being the file given
++ * as hard disk 0 (-load-hd0): a raw FAT16 image, superfloppy or partitioned,
++ * in 512-byte sectors.
++ *
++ * The real board leaves $E000-$FEFF to its CPLD; here the selected bank is
++ * mirrored there, as a 16K ROM with A13 driven by the bank bit would be. */
++
++#include "top-config.h"
++
++#include <assert.h>
++#include <stdint.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <time.h>
++
++#include "sds.h"
++
++#include "array.h"
++#include "cart.h"
++#include "logging.h"
++#include "messenger.h"
++#include "part.h"
++#include "romlist.h"
++#include "serialise.h"
++#include "ui.h"
++#include "xroar.h"
++
++#include "emesdos09/emes_fw.h"
++
++#define EMES_ROM_SIZE 16384
++#define EMES_BANK_SIZE 8192
++
++struct emesdos09 {
++	struct cart cart;
++	uint8_t rom[EMES_ROM_SIZE];
++	int msgr_client_id;
++};
++
++/* One SD card for the one controller model (the firmware keeps its state in
++ * globals, as firmware does). */
++static FILE *sd_image;
++static uint32_t sd_sectors;
++
++static const struct ser_struct ser_struct_emesdos09[] = {
++	SER_ID_STRUCT_NEST(1, &cart_ser_struct_data),
++};
++
++static const struct ser_struct_data emesdos09_ser_struct_data = {
++	.elems = ser_struct_emesdos09,
++	.num_elems = ARRAY_N_ELEMENTS(ser_struct_emesdos09),
++};
++
++static uint8_t emesdos09_read(struct cart *c, uint16_t A, bool P2, bool R2, uint8_t D);
++static uint8_t emesdos09_write(struct cart *c, uint16_t A, bool P2, bool R2, uint8_t D);
++static void emesdos09_reset(struct cart *c, bool hard);
++static void emesdos09_ui_set_hd_filename(void *sptr, int tag, void *smsg);
++
++static struct part *emesdos09_allocate(void);
++static void emesdos09_initialise(struct part *p, void *options);
++static bool emesdos09_finish(struct part *p);
++static void emesdos09_free(struct part *p);
++
++static const struct partdb_entry_funcs emesdos09_funcs = {
++	.allocate = emesdos09_allocate,
++	.initialise = emesdos09_initialise,
++	.finish = emesdos09_finish,
++	.free = emesdos09_free,
++
++	.ser_struct_data = &emesdos09_ser_struct_data,
++
++	.is_a = dragon_cart_is_a,
++};
++
++const struct cart_partdb_entry emesdos09_part = { .partdb_entry = { .name = "emesdos09", .description = "Carlos Camacho | emesDOS09 smart cartridge", .funcs = &emesdos09_funcs } };
++
++// - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
++// The SD card: an image file.
++
++bool emes_host_read_sector(uint32_t lba, uint8_t *sector) {
++	if (!sd_image || lba >= sd_sectors) {
++		return false;
++	}
++	if (fseeko(sd_image, (off_t)lba * 512, SEEK_SET) != 0) {
++		return false;
++	}
++	return fread(sector, 1, 512, sd_image) == 512;
++}
++
++bool emes_host_write_sector(uint32_t lba, const uint8_t *sector) {
++	if (!sd_image || lba >= sd_sectors) {
++		return false;
++	}
++	if (fseeko(sd_image, (off_t)lba * 512, SEEK_SET) != 0) {
++		return false;
++	}
++	if (fwrite(sector, 1, 512, sd_image) != 512) {
++		return false;
++	}
++	fflush(sd_image);
++	return true;
++}
++
++static void sd_close(void) {
++	if (sd_image) {
++		fclose(sd_image);
++		sd_image = NULL;
++	}
++	sd_sectors = 0;
++}
++
++static void sd_open(const char *filename) {
++	sd_close();
++	bool wp = false;
++	if (filename) {
++		sd_image = fopen(filename, "r+b");
++		if (!sd_image) {
++			sd_image = fopen(filename, "rb");
++			wp = true;
++		}
++		if (sd_image && fseeko(sd_image, 0, SEEK_END) == 0) {
++			off_t size = ftello(sd_image);
++			sd_sectors = size > 0 ? (uint32_t)(size / 512) : 0;
++		}
++		if (!sd_image) {
++			LOG_MOD_WARN("emesdos09", "can't open SD image %s\n", filename);
++		} else {
++			LOG_MOD_PRINT("emesdos09", "SD card: %s (%u sectors%s)\n", filename, (unsigned)sd_sectors, wp ? ", read-only" : "");
++		}
++	}
++	emes_fw_set_media(sd_image != NULL, wp);
++}
++
++/* The controller's clock follows the host's. */
++static void set_rtc_from_host(void) {
++	time_t now = time(NULL);
++	struct tm *t = localtime(&now);
++	if (!t) {
++		return;
++	}
++	unsigned year = (unsigned)t->tm_year + 1900;
++	uint8_t rtc[8] = {
++		(uint8_t)(year >> 8), (uint8_t)year, (uint8_t)(t->tm_mon + 1), (uint8_t)t->tm_mday,
++		(uint8_t)t->tm_hour, (uint8_t)t->tm_min, (uint8_t)t->tm_sec, (uint8_t)t->tm_wday
++	};
++	emes_fw_set_rtc(rtc);
++}
++
++// - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
++
++static struct part *emesdos09_allocate(void) {
++	struct emesdos09 *e = part_new(sizeof(*e));
++	struct cart *c = &e->cart;
++	struct part *p = &c->part;
++
++	*e = (struct emesdos09){0};
++
++	cart_rom_init(c);
++	c->read = emesdos09_read;
++	c->write = emesdos09_write;
++	c->reset = emesdos09_reset;
++
++	memset(e->rom, 0xff, sizeof(e->rom));
++	emes_fw_init();
++	emes_fw_trace = getenv("EMESDOS09_TRACE") != NULL;
++	return p;
++}
++
++static void emesdos09_initialise(struct part *p, void *options) {
++	cart_rom_initialise(p, options);
++}
++
++static bool emesdos09_finish(struct part *p) {
++	struct emesdos09 *e = (struct emesdos09 *)p;
++	struct cart *c = &e->cart;
++	struct cart_config *cc = c->config;
++
++	if (cc->rom) {
++		sds path = romlist_find(cc->rom);
++		FILE *f = path ? fopen(path, "rb") : NULL;
++		if (f) {
++			size_t n = fread(e->rom, 1, sizeof(e->rom), f);
++			fclose(f);
++			LOG_MOD_PRINT("emesdos09", "ROM: %s (%u bytes)\n", path, (unsigned)n);
++			if (n != EMES_ROM_SIZE) {
++				LOG_MOD_WARN("emesdos09", "ROM should be %d bytes (two 8K banks)\n", EMES_ROM_SIZE);
++			}
++		} else {
++			LOG_MOD_WARN("emesdos09", "ROM '%s' not found\n", cc->rom);
++		}
++		sdsfree(path);
++	}
++	if (!cart_rom_finish(p)) {
++		return 0;
++	}
++	set_rtc_from_host();
++	sd_open(xroar_hd_filename(0));
++
++	e->msgr_client_id = messenger_client_register();
++	ui_messenger_join_group(e->msgr_client_id, ui_tag_hd_filename, MESSENGER_NOTIFY_DELEGATE(emesdos09_ui_set_hd_filename, e));
++	return 1;
++}
++
++static void emesdos09_free(struct part *p) {
++	struct emesdos09 *e = (struct emesdos09 *)p;
++	messenger_client_unregister(e->msgr_client_id);
++	sd_close();
++	cart_rom_free(p);
++}
++
++static void emesdos09_ui_set_hd_filename(void *sptr, int tag, void *smsg) {
++	(void)sptr;
++	struct ui_state_message *uimsg = smsg;
++	assert(tag == ui_tag_hd_filename);
++	if (uimsg->value == 0) {
++		sd_open(uimsg->data);
++	}
++}
++
++static void emesdos09_reset(struct cart *c, bool hard) {
++	cart_rom_reset(c, hard);
++	if (hard) {
++		// Power cycle: bank 0, controller idle; the SD card stays in.
++		emes_fw_write(0x0, 0x00);
++		emes_fw_write(0xF, 0xFF);
++		set_rtc_from_host();
++	}
++}
++
++// - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
++
++static uint8_t emesdos09_read(struct cart *c, uint16_t A, bool P2, bool R2, uint8_t D) {
++	struct emesdos09 *e = (struct emesdos09 *)c;
++	if (R2) {
++		return e->rom[emes_fw_bank() * EMES_BANK_SIZE + (A & (EMES_BANK_SIZE - 1))];
++	}
++	if (P2 && (A & 0xfff0) == 0xff40) {
++		return emes_fw_read(A & 15);
++	}
++	return D;
++}
++
++static uint8_t emesdos09_write(struct cart *c, uint16_t A, bool P2, bool R2, uint8_t D) {
++	(void)c;
++	(void)R2;
++	if (P2 && (A & 0xfff0) == 0xff40) {
++		emes_fw_write(A & 15, D);
++	}
++	return D;
++}
+diff --git a/src/emesdos09/LICENSE.MIT b/src/emesdos09/LICENSE.MIT
+new file mode 100644
+index 00000000..9d1d201a
+--- /dev/null
++++ b/src/emesdos09/LICENSE.MIT
+@@ -0,0 +1,50 @@
++MIT License
++
++Copyright (c) 2026 Carlos Camacho
++
++Permission is hereby granted, free of charge, to any person obtaining a copy
++of this software and associated documentation files (the "Software"), to deal
++in the Software without restriction, including without limitation the rights
++to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
++copies of the Software, and to permit persons to whom the Software is
++furnished to do so, subject to the following conditions:
++
++The above copyright notice and this permission notice shall be included in all
++copies or substantial portions of the Software.
++
++THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
++AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
++OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
++SOFTWARE.
++
++-------------------------------------------------------------------------------
++Third-party notice: GW-BASIC
++
++The GW-BASIC interpreter in SOFTWARE/src/apps/gwbasic*.asm is a 6809 port based
++on Microsoft GW-BASIC, published by Microsoft at
++https://github.com/microsoft/GW-BASIC under the following license:
++
++MIT License
++
++Copyright (c) Microsoft Corporation.
++
++Permission is hereby granted, free of charge, to any person obtaining a copy
++of this software and associated documentation files (the "Software"), to deal
++in the Software without restriction, including without limitation the rights
++to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
++copies of the Software, and to permit persons to whom the Software is
++furnished to do so, subject to the following conditions:
++
++The above copyright notice and this permission notice shall be included in all
++copies or substantial portions of the Software.
++
++THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
++AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
++OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
++SOFTWARE
+diff --git a/src/emesdos09/coco_image.c b/src/emesdos09/coco_image.c
+new file mode 100644
+index 00000000..8330dfd8
+--- /dev/null
++++ b/src/emesdos09/coco_image.c
+@@ -0,0 +1,284 @@
++#include "coco_image.h"
++
++#include <stddef.h>
++#include <string.h>
++
++#define SDF_HEADER_SIZE 512u
++#define SDF_TRACK_RECORD 6656u
++
++static uint16_t le16(const uint8_t *p) {
++    return (uint16_t)((uint16_t)p[0] | ((uint16_t)p[1] << 8));
++}
++
++static bool read_exact(emes_coco_image_t *image, uint32_t offset, uint8_t *data, uint16_t length) {
++    if (image == NULL || image->reader == NULL || data == NULL) return false;
++    if (offset > image->file_size || (uint32_t)length > image->file_size - offset) return false;
++    return image->reader(offset, data, length, image->context);
++}
++
++emes_coco_result_t emes_coco_image_mount(
++    emes_coco_image_t *image, emes_coco_reader_t reader, void *context,
++    uint32_t file_size, uint16_t generation
++) {
++    return emes_coco_image_mount_rw(image, reader, NULL, context, file_size, generation);
++}
++
++emes_coco_result_t emes_coco_image_mount_rw(
++    emes_coco_image_t *image, emes_coco_reader_t reader, emes_coco_writer_t writer,
++    void *context, uint32_t file_size, uint16_t generation
++) {
++    uint8_t first[8];
++    if (image == NULL || reader == NULL || file_size < 8u) return EMES_COCO_INVALID;
++    memset(image, 0, sizeof(*image));
++    image->reader = reader;
++    image->writer = writer;
++    image->context = context;
++    image->file_size = file_size;
++    image->read_only = true;
++    image->generation = generation;
++    if (!read_exact(image, 0u, first, sizeof(first))) return EMES_COCO_IO;
++    if (memcmp(first, "SDF1", 4u) == 0) {
++        const uint8_t cylinders = first[4];
++        const uint8_t sides = first[5];
++        const uint8_t permission = first[6];
++        const uint8_t nested = first[7];
++        if (cylinders == 0u || cylinders > 80u || (sides != 1u && sides != 2u) || nested > 1u)
++            return EMES_COCO_INVALID;
++        const uint32_t expected = SDF_HEADER_SIZE + (uint32_t)cylinders * sides * SDF_TRACK_RECORD;
++        if (file_size != expected) return EMES_COCO_INVALID;
++        image->format = EMES_COCO_FORMAT_SDF1;
++        image->header_size = SDF_HEADER_SIZE;
++        image->cylinders = cylinders;
++        image->sides = sides;
++        image->sectors_per_track = 18u;
++        image->sector_size = 256u;
++        image->first_sector_id = 1u;
++        image->nested_sectors = nested != 0u;
++        image->read_only = writer == NULL || permission == 0u || nested != 0u ||
++            sides != 1u || (cylinders != 35u && cylinders != 40u && cylinders != 80u);
++        return EMES_COCO_OK;
++    }
++    const uint16_t header_size = (uint16_t)(file_size & 0xFFu);
++    if (header_size > 5u) return EMES_COCO_INVALID;
++    uint8_t header[5] = {18u, 1u, 1u, 1u, 0u};
++    if (header_size != 0u && !read_exact(image, 0u, header, header_size)) return EMES_COCO_IO;
++    const uint8_t spt = header[0];
++    const uint8_t sides = header_size >= 2u ? header[1] : 1u;
++    const uint8_t size_code = header_size >= 3u ? header[2] : 1u;
++    const uint8_t first_sector = header_size >= 4u ? header[3] : 1u;
++    const uint8_t attrs = header_size >= 5u ? header[4] : 0u;
++    const uint16_t sector_size = (uint16_t)(128u << size_code);
++    if (spt == 0u || (sides != 1u && sides != 2u) || sector_size != 256u || attrs != 0u)
++        return EMES_COCO_INVALID;
++    const uint32_t payload = file_size - header_size;
++    const uint32_t track_bytes = (uint32_t)spt * sides * sector_size;
++    if (payload == 0u || track_bytes == 0u || payload % track_bytes != 0u) return EMES_COCO_INVALID;
++    const uint32_t cylinders = payload / track_bytes;
++    if (cylinders < 18u || cylinders > 80u) return EMES_COCO_INVALID;
++    image->format = header_size == 0u ? EMES_COCO_FORMAT_DSK : EMES_COCO_FORMAT_JVC;
++    image->header_size = header_size;
++    image->cylinders = (uint8_t)cylinders;
++    image->sides = sides;
++    image->sectors_per_track = spt;
++    image->sector_size = sector_size;
++    image->first_sector_id = first_sector;
++    image->read_only = writer == NULL || sides != 1u || spt != 18u || first_sector != 1u ||
++        (cylinders != 35u && cylinders != 40u && cylinders != 80u);
++    return EMES_COCO_OK;
++}
++
++static emes_coco_result_t read_flat_sector(
++    emes_coco_image_t *image, uint8_t cylinder, uint8_t side,
++    uint8_t sector_id, uint8_t output[256]
++) {
++    if (sector_id < image->first_sector_id) return EMES_COCO_SEEK;
++    const uint8_t index = (uint8_t)(sector_id - image->first_sector_id);
++    if (index >= image->sectors_per_track) return EMES_COCO_SEEK;
++    const uint32_t linear = ((uint32_t)cylinder * image->sides + side) * image->sectors_per_track + index;
++    const uint32_t absolute = image->header_size + linear * 256u;
++    const uint32_t pair = absolute & ~511u;
++    if (!image->cache_valid || image->cache_offset != pair) {
++        uint16_t available = 512u;
++        if (pair + available > image->file_size) available = (uint16_t)(image->file_size - pair);
++        memset(image->cache, 0, sizeof(image->cache));
++        if (!read_exact(image, pair, image->cache, available)) return EMES_COCO_IO;
++        image->cache_offset = pair;
++        image->cache_valid = true;
++    }
++    memcpy(output, &image->cache[absolute - pair], 256u);
++    return EMES_COCO_OK;
++}
++
++static emes_coco_result_t read_sdf_sector(
++    emes_coco_image_t *image, uint8_t cylinder, uint8_t side,
++    uint8_t sector_id, uint8_t output[256]
++) {
++    uint8_t header[256];
++    const uint32_t record = SDF_HEADER_SIZE + ((uint32_t)cylinder * image->sides + side) * SDF_TRACK_RECORD;
++    if (!read_exact(image, record, header, sizeof(header))) return EMES_COCO_IO;
++    const uint8_t count = header[0];
++    if (count > 31u) return EMES_COCO_INVALID;
++    for (uint8_t i = 0u; i < count; ++i) {
++        const uint8_t *entry = &header[8u + (uint16_t)i * 8u];
++        const uint16_t data_offset = (uint16_t)(le16(&entry[2]) & 0x3FFFu);
++        const uint8_t size_code = entry[7];
++        if (entry[4] == cylinder && entry[5] == side && entry[6] == sector_id) {
++            if (size_code != 1u || data_offset < 256u || data_offset > SDF_TRACK_RECORD - 256u)
++                return EMES_COCO_INVALID;
++            return read_exact(image, record + data_offset, output, 256u) ? EMES_COCO_OK : EMES_COCO_IO;
++        }
++    }
++    return EMES_COCO_SEEK;
++}
++
++emes_coco_result_t emes_coco_read_sector(
++    emes_coco_image_t *image, uint8_t cylinder, uint8_t side,
++    uint8_t sector_id, uint8_t output[256]
++) {
++    if (image == NULL || output == NULL || image->format == EMES_COCO_FORMAT_NONE)
++        return EMES_COCO_INVALID;
++    if (cylinder >= image->cylinders || side >= image->sides) return EMES_COCO_SEEK;
++    return image->format == EMES_COCO_FORMAT_SDF1
++        ? read_sdf_sector(image, cylinder, side, sector_id, output)
++        : read_flat_sector(image, cylinder, side, sector_id, output);
++}
++
++static emes_coco_result_t flat_sector_offset(
++    const emes_coco_image_t *image, uint8_t cylinder, uint8_t side, uint8_t sector_id, uint32_t *offset
++) {
++    if (image == NULL || offset == NULL || cylinder >= image->cylinders || side >= image->sides)
++        return EMES_COCO_SEEK;
++    if (sector_id < image->first_sector_id) return EMES_COCO_SEEK;
++    const uint8_t index = (uint8_t)(sector_id - image->first_sector_id);
++    if (index >= image->sectors_per_track) return EMES_COCO_SEEK;
++    const uint32_t linear = ((uint32_t)cylinder * image->sides + side) * image->sectors_per_track + index;
++    *offset = image->header_size + linear * 256u;
++    return *offset + 256u <= image->file_size ? EMES_COCO_OK : EMES_COCO_SEEK;
++}
++
++static emes_coco_result_t sdf_sector_offset(
++    emes_coco_image_t *image, uint8_t cylinder, uint8_t side, uint8_t sector_id, uint32_t *offset
++) {
++    uint8_t header[256];
++    const uint32_t record = SDF_HEADER_SIZE + ((uint32_t)cylinder * image->sides + side) * SDF_TRACK_RECORD;
++    if (!read_exact(image, record, header, sizeof(header))) return EMES_COCO_IO;
++    if (header[0] > 31u) return EMES_COCO_INVALID;
++    for (uint8_t i = 0u; i < header[0]; ++i) {
++        const uint8_t *entry = &header[8u + (uint16_t)i * 8u];
++        const uint16_t data_offset = (uint16_t)(le16(&entry[2]) & 0x3FFFu);
++        if (entry[4] == cylinder && entry[5] == side && entry[6] == sector_id) {
++            if (entry[7] != 1u || data_offset < 256u || data_offset > SDF_TRACK_RECORD - 256u)
++                return EMES_COCO_INVALID;
++            *offset = record + data_offset;
++            return EMES_COCO_OK;
++        }
++    }
++    return EMES_COCO_SEEK;
++}
++
++emes_coco_result_t emes_coco_write_sector(
++    emes_coco_image_t *image, uint8_t cylinder, uint8_t side,
++    uint8_t sector_id, const uint8_t input[256]
++) {
++    uint32_t offset = 0u;
++    if (image == NULL || input == NULL || image->format == EMES_COCO_FORMAT_NONE) return EMES_COCO_INVALID;
++    if (image->read_only || image->writer == NULL) return EMES_COCO_IO;
++    emes_coco_result_t result = image->format == EMES_COCO_FORMAT_SDF1
++        ? sdf_sector_offset(image, cylinder, side, sector_id, &offset)
++        : flat_sector_offset(image, cylinder, side, sector_id, &offset);
++    if (result != EMES_COCO_OK) return result;
++    if (!image->writer(offset, input, 256u, image->context)) return EMES_COCO_IO;
++    image->cache_valid = false;
++    return EMES_COCO_OK;
++}
++
++emes_coco_result_t emes_decb_open_dir(emes_coco_image_t *image, emes_decb_dir_t *directory) {
++    uint8_t sector[256];
++    if (image == NULL || directory == NULL || image->cylinders <= 17u) return EMES_COCO_INVALID;
++    if (emes_coco_read_sector(image, 17u, 0u, 2u, sector) != EMES_COCO_OK) return EMES_COCO_INVALID;
++    directory->sector_id = 3u;
++    directory->entry_offset = 0u;
++    directory->finished = false;
++    return EMES_COCO_OK;
++}
++
++static emes_coco_result_t decb_size(
++    emes_coco_image_t *image, uint8_t first_granule, uint16_t last_bytes, uint32_t *size
++) {
++    uint8_t fat[256];
++    uint8_t seen[9] = {0};
++    uint8_t granule = first_granule;
++    uint32_t total = 0u;
++    if (size == NULL || emes_coco_read_sector(image, 17u, 0u, 2u, fat) != EMES_COCO_OK)
++        return EMES_COCO_INVALID;
++    if (granule >= 68u) { *size = 0u; return EMES_COCO_OK; }
++    for (uint8_t steps = 0u; steps < 68u; ++steps) {
++        const uint8_t bit = (uint8_t)(1u << (granule & 7u));
++        if ((seen[granule >> 3] & bit) != 0u) return EMES_COCO_INVALID;
++        seen[granule >> 3] |= bit;
++        const uint8_t marker = fat[granule];
++        if (marker < 68u) { total += 2304u; granule = marker; continue; }
++        if (marker >= 0xC0u && marker <= 0xC9u) {
++            const uint8_t sectors = (uint8_t)(marker & 0x3Fu);
++            if (sectors != 0u) total += (uint32_t)(sectors - 1u) * 256u + (last_bytes == 0u ? 256u : last_bytes);
++            *size = total;
++            return EMES_COCO_OK;
++        }
++        return EMES_COCO_INVALID;
++    }
++    return EMES_COCO_INVALID;
++}
++
++emes_coco_result_t emes_decb_dir_next(
++    emes_coco_image_t *image, emes_decb_dir_t *directory, emes_decb_entry_t *entry
++) {
++    uint8_t sector[256];
++    if (image == NULL || directory == NULL || entry == NULL || directory->finished)
++        return EMES_COCO_NO_MORE;
++    while (directory->sector_id <= 11u) {
++        emes_coco_result_t result = emes_coco_read_sector(image, 17u, 0u, directory->sector_id, sector);
++        if (result != EMES_COCO_OK) return result;
++        while (directory->entry_offset < 256u) {
++            const uint8_t *raw = &sector[directory->entry_offset];
++            directory->entry_offset = (uint16_t)(directory->entry_offset + 32u);
++            if (raw[0] == 0xFFu) { directory->finished = true; return EMES_COCO_NO_MORE; }
++            if (raw[0] == 0x00u) continue;
++            for (uint8_t i = 0u; i < 11u; ++i) {
++                if (raw[i] < 0x20u || raw[i] > 0x7Eu) return EMES_COCO_INVALID;
++                entry->alias_raw[i] = raw[i];
++            }
++            entry->file_type = raw[11];
++            entry->ascii_flag = raw[12];
++            entry->first_granule = raw[13];
++            const uint16_t last = (uint16_t)(((uint16_t)raw[14] << 8) | raw[15]);
++            return decb_size(image, entry->first_granule, last, &entry->size);
++        }
++        ++directory->sector_id;
++        directory->entry_offset = 0u;
++    }
++    directory->finished = true;
++    return EMES_COCO_NO_MORE;
++}
++
++void emes_coco_image_info(
++    const emes_coco_image_t *image, const char *path, uint8_t output[32]
++) {
++    if (output == NULL) return;
++    memset(output, 0, 32u);
++    if (image == NULL) return;
++    output[0] = 1u;
++    output[1] = (uint8_t)image->format;
++    output[2] = image->cylinders;
++    output[3] = image->sides;
++    output[4] = image->sectors_per_track;
++    output[5] = image->read_only ? 1u : 0u;
++    output[6] = (uint8_t)(image->sector_size >> 8);
++    output[7] = (uint8_t)image->sector_size;
++    output[8] = (uint8_t)(image->generation >> 8);
++    output[9] = (uint8_t)image->generation;
++    if (path != NULL) {
++        const char *base = path;
++        for (const char *p = path; *p != '\0'; ++p) if (*p == '\\' || *p == '/') base = p + 1;
++        for (uint8_t i = 0u; i < 21u && base[i] != '\0'; ++i) output[10u + i] = (uint8_t)base[i];
++    }
++}
+diff --git a/src/emesdos09/coco_image.h b/src/emesdos09/coco_image.h
+new file mode 100644
+index 00000000..4e83f047
+--- /dev/null
++++ b/src/emesdos09/coco_image.h
+@@ -0,0 +1,86 @@
++#ifndef EMESDOS09_COCO_IMAGE_H
++#define EMESDOS09_COCO_IMAGE_H
++
++#include <stdbool.h>
++#include <stdint.h>
++
++#define EMES_COCO_SECTOR_SIZE 256u
++#define EMES_COCO_IMAGE_INFO_SIZE 32u
++
++typedef enum {
++    EMES_COCO_OK = 0,
++    EMES_COCO_IO,
++    EMES_COCO_INVALID,
++    EMES_COCO_SEEK,
++    EMES_COCO_NO_MORE
++} emes_coco_result_t;
++
++typedef enum {
++    EMES_COCO_FORMAT_NONE = 0,
++    EMES_COCO_FORMAT_DSK = 1,
++    EMES_COCO_FORMAT_JVC = 2,
++    EMES_COCO_FORMAT_SDF1 = 3
++} emes_coco_format_t;
++
++typedef bool (*emes_coco_reader_t)(uint32_t offset, uint8_t *data, uint16_t length, void *context);
++typedef bool (*emes_coco_writer_t)(uint32_t offset, const uint8_t *data, uint16_t length, void *context);
++
++typedef struct {
++    emes_coco_reader_t reader;
++    emes_coco_writer_t writer;
++    void *context;
++    uint32_t file_size;
++    emes_coco_format_t format;
++    uint16_t header_size;
++    uint8_t cylinders;
++    uint8_t sides;
++    uint8_t sectors_per_track;
++    uint16_t sector_size;
++    uint8_t first_sector_id;
++    bool read_only;
++    bool nested_sectors;
++    uint32_t cache_offset;
++    bool cache_valid;
++    uint8_t cache[512];
++    uint16_t generation;
++} emes_coco_image_t;
++
++typedef struct {
++    uint8_t sector_id;
++    uint16_t entry_offset;
++    bool finished;
++} emes_decb_dir_t;
++
++typedef struct {
++    uint8_t alias_raw[11];
++    uint8_t file_type;
++    uint8_t ascii_flag;
++    uint8_t first_granule;
++    uint32_t size;
++} emes_decb_entry_t;
++
++emes_coco_result_t emes_coco_image_mount(
++    emes_coco_image_t *image, emes_coco_reader_t reader, void *context,
++    uint32_t file_size, uint16_t generation
++);
++emes_coco_result_t emes_coco_image_mount_rw(
++    emes_coco_image_t *image, emes_coco_reader_t reader, emes_coco_writer_t writer,
++    void *context, uint32_t file_size, uint16_t generation
++);
++emes_coco_result_t emes_coco_read_sector(
++    emes_coco_image_t *image, uint8_t cylinder, uint8_t side,
++    uint8_t sector_id, uint8_t output[EMES_COCO_SECTOR_SIZE]
++);
++emes_coco_result_t emes_coco_write_sector(
++    emes_coco_image_t *image, uint8_t cylinder, uint8_t side,
++    uint8_t sector_id, const uint8_t input[EMES_COCO_SECTOR_SIZE]
++);
++emes_coco_result_t emes_decb_open_dir(emes_coco_image_t *image, emes_decb_dir_t *directory);
++emes_coco_result_t emes_decb_dir_next(
++    emes_coco_image_t *image, emes_decb_dir_t *directory, emes_decb_entry_t *entry
++);
++void emes_coco_image_info(
++    const emes_coco_image_t *image, const char *path, uint8_t output[EMES_COCO_IMAGE_INFO_SIZE]
++);
++
++#endif
+diff --git a/src/emesdos09/controller_protocol.h b/src/emesdos09/controller_protocol.h
+new file mode 100644
+index 00000000..6c56ce1b
+--- /dev/null
++++ b/src/emesdos09/controller_protocol.h
+@@ -0,0 +1,174 @@
++#ifndef EMESDOS09_CONTROLLER_PROTOCOL_H
++#define EMESDOS09_CONTROLLER_PROTOCOL_H
++
++#include <stdint.h>
++
++#define EMES_CTRL_PROTO_MAJOR 2u
++#define EMES_CTRL_PROTO_MINOR 2u
++#define EMES_CTRL_FW_MAJOR    0u
++#define EMES_CTRL_FW_MINOR    17u
++#define EMES_CTRL_FW_PATCH    0u
++
++#define EMES_CMD_IDENTIFY       0x01u
++#define EMES_CMD_STATUS         0x02u
++#define EMES_CMD_RESET          0x03u
++#define EMES_CMD_LED            0x04u
++#define EMES_CMD_RTC_GET        0x10u
++#define EMES_CMD_RTC_SET        0x11u
++#define EMES_CMD_MEDIA_STATUS   0x20u
++#define EMES_CMD_SECTOR_READ    0x30u
++#define EMES_CMD_SECTOR_WRITE   0x31u
++#define EMES_CMD_SYNC           0x32u
++#define EMES_CMD_FILE_OPEN      0x40u
++#define EMES_CMD_FILE_READ      0x41u
++#define EMES_CMD_FILE_CLOSE     0x42u
++#define EMES_CMD_FILE_SEEK      0x43u
++#define EMES_CMD_FILE_STAT      0x44u
++#define EMES_CMD_FILE_CREATE    0x45u
++#define EMES_CMD_FILE_WRITE     0x46u
++#define EMES_CMD_FILE_TRUNCATE  0x47u
++#define EMES_CMD_FILE_CREATE_NEW 0x48u
++#define EMES_CMD_FILE_CREATE_TEMP 0x49u
++#define EMES_CMD_FILE_ABORT     0x4Au
++#define EMES_CMD_VOLUME_MOUNT   0x50u
++#define EMES_CMD_VOLUME_UNMOUNT 0x51u
++#define EMES_CMD_DIR_OPEN       0x52u
++#define EMES_CMD_DIR_READ       0x53u
++#define EMES_CMD_DIR_CLOSE      0x54u
++#define EMES_CMD_VOLUME_FREE    0x55u
++#define EMES_CMD_VOLUME_INFO    0x56u
++#define EMES_CMD_CACHE_STATUS   0x57u
++#define EMES_CMD_WRITE_STATUS   0x58u
++#define EMES_CMD_DIR_CREATE     0x59u
++#define EMES_CMD_DIR_REMOVE     0x5Au
++#define EMES_CMD_PATH_DELETE    0x5Bu
++#define EMES_CMD_PATH_RENAME    0x5Cu
++#define EMES_CMD_PATH_ATTR      0x5Du
++#define EMES_CMD_FILE_TIME      0x5Eu
++#define EMES_CMD_VOLUME_LABEL_SET 0x5Fu
++#define EMES_CMD_STREAM_STATUS   0x60u
++#define EMES_CMD_INTEGRITY_CHECK 0x61u
++#define EMES_CMD_FAULT_LOG_READ  0x62u
++#define EMES_CMD_FAULT_LOG_CLEAR 0x63u
++#define EMES_CMD_IMAGE_MOUNT      0x64u
++#define EMES_CMD_IMAGE_UNMOUNT    0x65u
++#define EMES_CMD_IMAGE_LIST       0x66u
++#define EMES_CMD_IMAGE_SECTOR_READ 0x67u
++#define EMES_CMD_IMAGE_SECTOR_WRITE 0x68u
++#define EMES_CMD_IMAGE_FLUSH        0x69u
++#define EMES_CMD_DECB_IMPORT        0x6Au
++#define EMES_CMD_DECB_EXPORT        0x6Bu
++#define EMES_CMD_IMAGE_COPY         0x6Cu
++#define EMES_CMD_IMAGE_COMPARE      0x6Du
++#define EMES_CMD_IDE_CREATE         0x6Eu
++#define EMES_CMD_IDE_ATTACH         0x6Fu
++#define EMES_CMD_IDE_DETACH         0x70u
++#define EMES_CMD_IDE_STATUS         0x71u
++#define EMES_CMD_IDE_SECTOR_READ    0x72u
++#define EMES_CMD_IDE_SECTOR_WRITE   0x73u
++#define EMES_CMD_IDE_IDENTIFY       0x74u
++#define EMES_CMD_IDE_FLUSH          0x75u
++#define EMES_CMD_IDE_PARTITIONS     0x76u
++#define EMES_CMD_IDE_FDISK          0x77u
++#define EMES_CMD_IDE_FORMAT         0x78u
++#define EMES_CMD_PARTITION_MOUNT    0x79u
++#define EMES_CMD_PARTITION_UNMOUNT  0x7Au
++#define EMES_CMD_PARTITION_STATUS   0x7Bu
++#define EMES_CMD_PARTITION_CHKDSK   0x7Cu
++#define EMES_CMD_PARTITION_SYS      0x7Du
++#define EMES_CMD_PARTITION_FILE_WRITE 0x7Eu
++#define EMES_CMD_PARTITION_FILE_READ  0x7Fu
++
++#define EMES_ST_BUSY          0x01u
++#define EMES_ST_DATA          0x02u
++#define EMES_ST_DONE          0x04u
++#define EMES_ST_ERROR         0x08u
++#define EMES_ST_CARD          0x10u
++#define EMES_ST_CHANGED       0x20u
++#define EMES_ST_WRITE_PROTECT 0x40u
++#define EMES_ST_RTC_VALID     0x80u
++
++#define EMES_ERR_OK             0x00u
++#define EMES_ERR_NOT_READY      0x01u
++#define EMES_ERR_BAD_COMMAND    0x02u
++#define EMES_ERR_TIMEOUT        0x03u
++#define EMES_ERR_NO_MEDIA       0x04u
++#define EMES_ERR_WRITE_PROTECT  0x05u
++#define EMES_ERR_IO             0x06u
++#define EMES_ERR_BAD_ARGUMENT   0x07u
++#define EMES_ERR_BAD_STATE      0x08u
++#define EMES_ERR_CRC            0x09u
++#define EMES_ERR_NO_SPACE       0x0Au
++#define EMES_ERR_UNSUPPORTED    0x0Bu
++#define EMES_ERR_FILE_NOT_FOUND 0x0Cu
++#define EMES_ERR_PATH_NOT_FOUND 0x0Du
++#define EMES_ERR_INVALID_FORMAT 0x0Eu
++#define EMES_ERR_NO_MORE_FILES  0x0Fu
++#define EMES_ERR_TOO_MANY_OPEN  0x10u
++#define EMES_ERR_INVALID_HANDLE 0x11u
++#define EMES_ERR_SEEK           0x12u
++#define EMES_ERR_FILE_EXISTS    0x13u
++#define EMES_ERR_ACCESS_DENIED  0x14u
++#define EMES_ERR_POWER_LOSS     0x15u
++#define EMES_ERR_DIR_NOT_EMPTY   0x16u
++#define EMES_ERR_INVALID_NAME    0x17u
++#define EMES_ERR_FAT_LOOP        0x18u
++#define EMES_ERR_INVALID_CLUSTER 0x19u
++
++#define EMES_CAP_RTC             0x0001u
++#define EMES_CAP_LED             0x0002u
++#define EMES_CAP_RAW_SECTOR      0x0004u
++#define EMES_CAP_FAT12           0x0008u
++#define EMES_CAP_FAT16           0x0010u
++#define EMES_CAP_FAT32           0x0020u
++#define EMES_CAP_FLOPPY_IMAGE    0x0040u
++#define EMES_CAP_IDE_IMAGE       0x0080u
++#define EMES_CAP_CARD_DETECT     0x0100u
++#define EMES_CAP_BATTERY_LOW     0x0200u
++#define EMES_CAP_HOST_FILE_RO    0x0400u
++#define EMES_CAP_DIAGNOSTIC      0x0800u
++#define EMES_CAP_FAT_WRITE       0x1000u
++#define EMES_CAP_VERIFY_WRITE    0x2000u
++#define EMES_CAP_INTEGRITY_CHECK 0x4000u
++#define EMES_CAP_FAULT_LOG       0x8000u
++
++#define EMES_IDENTIFY_SIZE         16u
++#define EMES_STATUS_SIZE            8u
++#define EMES_RTC_SIZE               8u
++#define EMES_MEDIA_SIZE            12u
++#define EMES_VOLUME_SIZE           32u
++#define EMES_FREE_SPACE_SIZE       12u
++#define EMES_CACHE_STATUS_SIZE      8u
++#define EMES_WRITE_STATUS_SIZE     12u
++#define EMES_STREAM_STATUS_SIZE    12u
++#define EMES_INTEGRITY_REPORT_SIZE 32u
++#define EMES_FAULT_LOG_RECORD_SIZE 16u
++#define EMES_IMAGE_INFO_SIZE       32u
++#define EMES_IDE_INFO_SIZE          64u
++#define EMES_IDE_PARTITION_REPORT_SIZE 68u
++#define EMES_PARTITION_INFO_SIZE      32u
++#define EMES_PARTITION_CHECK_SIZE     32u
++#define EMES_DIR_RECORD_SIZE       32u
++#define EMES_FILE_OPEN_PATH_SIZE    8u
++#define EMES_FILE_WRITE_RESULT_SIZE 6u
++#define EMES_FILE_STAT_SIZE        20u
++#define EMES_TEMP_PATH_SIZE        80u
++#define EMES_FILE_TIME_SIZE          4u
++#define EMES_RENAME_RESULT_SIZE     80u
++#define EMES_FIFO_SIZE            256u
++
++#define EMES_BOOT_FILE_SELECTOR 0u
++#define EMES_PATH_FILE_SELECTOR 1u
++#define EMES_CREATE_TRUNCATE    0u
++#define EMES_CREATE_NEW         1u
++#define EMES_CREATE_TEMP        2u
++#define EMES_WRITE_VERIFY       0x01u
++#define EMES_OBJECT_HANDLE_MIN  1u
++#define EMES_OBJECT_HANDLE_MAX  8u
++
++#define EMES_VOL_FLAG_MOUNTED     0x01u
++#define EMES_VOL_FLAG_MBR         0x02u
++#define EMES_VOL_FLAG_SUPERFLOPPY 0x04u
++#define EMES_VOL_FLAG_LFN         0x08u
++
++#endif
+diff --git a/src/emesdos09/emes_fw.c b/src/emesdos09/emes_fw.c
+new file mode 100644
+index 00000000..d941b164
+--- /dev/null
++++ b/src/emesdos09/emes_fw.c
+@@ -0,0 +1,1010 @@
++/* emesDOS09 controller firmware command core, adapted for XRoar.
++ *
++ * Copied from CarlosCamacho/EmEsDOS09 HARDWARE/emesDOS09/firmware/pic32/src/
++ * main.c (commit a41c25a, MIT licence, see LICENSE.MIT).  Changes: the two
++ * platform_sd_*_sector functions call the emulator's image file, one memcpy
++ * reads the size of its literal, and main() is replaced by the register-block
++ * adapter at the end.
++ */
++/*
++ * emesDOS09 PIC32 controller firmware core, Sprint 24
++ * Target: PIC32MX170F256B-I/SP
++ *
++ * Protocol 2.2 retains the virtual IDE layer and adds protected MBR creation,
++ * FAT12/FAT16 formatting and partition services, plus FAT32 read probing. The Python controller
++ * is the executable reference until physical SD-SPI and VIA handshakes are
++ * connected. Every object remains generation validated.
++ */
++#include <stdbool.h>
++#include <stddef.h>
++#include <stdint.h>
++#include <stdio.h>
++#include <string.h>
++
++#include "controller_protocol.h"
++#include "fat16_ro.h"
++#include "fat16_rw.h"
++#include "fat16_meta.h"
++#include "fat16_check.h"
++#include "coco_image.h"
++#include "ide_image.h"
++#include "partition_fat.h"
++#include "emes_fw.h"
++
++#define EMES_MAX_OBJECTS 8u
++
++typedef enum {
++    OBJECT_NONE = 0,
++    OBJECT_BOOT_CFG,
++    OBJECT_FAT16_FILE,
++    OBJECT_DIRECTORY,
++    OBJECT_IMAGE_DIRECTORY
++} emes_object_kind_t;
++
++typedef struct {
++    emes_object_kind_t kind;
++    uint16_t media_generation;
++    uint16_t boot_file_position;
++    emes_fat16_dir_t directory;
++    emes_fat16_file_t file;
++    emes_decb_dir_t image_directory;
++    uint16_t image_generation;
++} emes_object_t;
++
++typedef struct {
++    volatile uint8_t status;
++    volatile uint8_t error;
++    volatile uint8_t args[8];
++    volatile uint16_t count;
++    volatile uint8_t fifo[EMES_FIFO_SIZE];
++    volatile uint16_t fifo_read;
++    volatile uint16_t fifo_write;
++    volatile uint16_t media_generation;
++    volatile uint8_t led_state;
++    volatile bool rtc_valid;
++    volatile bool battery_low;
++    volatile bool card_present;
++    volatile bool write_protect;
++    volatile bool media_changed;
++    volatile bool volume_mounted;
++    volatile uint16_t cache_hits;
++    volatile uint16_t cache_misses;
++    volatile uint16_t retry_count;
++    volatile uint16_t cache_generation;
++    volatile uint16_t sync_count;
++    volatile uint16_t data_cluster_writes;
++    volatile uint16_t fat_entry_writes;
++    volatile uint16_t directory_entry_writes;
++    volatile uint16_t verify_passes;
++    volatile uint16_t stream_read_calls;
++    volatile uint16_t stream_write_calls;
++    volatile uint32_t stream_read_bytes;
++    volatile uint32_t stream_write_bytes;
++    volatile uint16_t transaction_sequence;
++    volatile uint8_t transaction_log_count;
++    uint8_t transaction_log[16][EMES_FAULT_LOG_RECORD_SIZE];
++    emes_fat16_volume_t volume;
++    emes_object_t objects[EMES_MAX_OBJECTS];
++    bool image_mounted;
++    uint16_t image_generation;
++    char image_path[80];
++    emes_fat16_file_t image_file;
++    emes_coco_image_t image;
++} emes_controller_state_t;
++
++static emes_controller_state_t g_controller;
++static uint8_t g_rtc[EMES_RTC_SIZE] = {0x07u, 0xEAu, 7u, 27u, 12u, 0u, 0u, 1u};
++static const uint8_t g_boot_cfg[] =
++    "CONSOLE=ORANGE\r\n"
++    "QUIET=OFF\r\n"
++    "SAFEBOOT=OFF\r\n";
++
++/* Replace this function with the PIC32 SD-SPI block driver. */
++static bool platform_sd_read_sector(uint32_t lba, uint8_t *sector, void *context) {
++    (void)context;
++    return emes_host_read_sector(lba, sector);   /* XRoar: the attached image file */
++}
++
++/* Replace with the PIC32 SD-SPI block writer before enabling write capability. */
++static bool platform_sd_write_sector(uint32_t lba, const uint8_t *sector, void *context) {
++    (void)context;
++    return emes_host_write_sector(lba, sector);
++}
++
++static emes_fat16_sector_writer_t g_sector_writer = platform_sd_write_sector;
++static bool g_physical_write_enabled;
++
++static uint8_t base_status(void) {
++    uint8_t value = 0u;
++    if (g_controller.card_present) value |= EMES_ST_CARD;
++    if (g_controller.media_changed) value |= EMES_ST_CHANGED;
++    if (g_controller.write_protect) value |= EMES_ST_WRITE_PROTECT;
++    if (g_controller.rtc_valid) value |= EMES_ST_RTC_VALID;
++    return value;
++}
++
++static void fifo_reset(void) {
++    g_controller.fifo_read = 0u;
++    g_controller.fifo_write = 0u;
++}
++
++static bool fifo_write_byte(uint8_t value) {
++    if (g_controller.fifo_write >= EMES_FIFO_SIZE) return false;
++    g_controller.fifo[g_controller.fifo_write++] = value;
++    return true;
++}
++
++static void fifo_write_be16(uint16_t value) {
++    (void)fifo_write_byte((uint8_t)(value >> 8));
++    (void)fifo_write_byte((uint8_t)value);
++}
++
++static void fifo_write_be32(uint32_t value) {
++    (void)fifo_write_byte((uint8_t)(value >> 24));
++    (void)fifo_write_byte((uint8_t)(value >> 16));
++    (void)fifo_write_byte((uint8_t)(value >> 8));
++    (void)fifo_write_byte((uint8_t)value);
++}
++
++static uint32_t input_be32(const uint8_t *data) {
++    return ((uint32_t)data[0] << 24) | ((uint32_t)data[1] << 16) |
++        ((uint32_t)data[2] << 8) | (uint32_t)data[3];
++}
++
++static void finish_ok(void) {
++    g_controller.error = EMES_ERR_OK;
++    g_controller.count = g_controller.fifo_write;
++    g_controller.status = (uint8_t)(base_status() | EMES_ST_DONE);
++    if (g_controller.fifo_write != 0u) g_controller.status |= EMES_ST_DATA;
++}
++
++static void finish_error(uint8_t error) {
++    fifo_reset();
++    g_controller.count = 0u;
++    g_controller.error = error;
++    g_controller.status = (uint8_t)(base_status() | EMES_ST_DONE | EMES_ST_ERROR);
++}
++
++static uint8_t map_fat_result(emes_fat16_result_t result) {
++    switch (result) {
++        case EMES_FAT16_OK: return EMES_ERR_OK;
++        case EMES_FAT16_IO: return EMES_ERR_IO;
++        case EMES_FAT16_INVALID: return EMES_ERR_INVALID_FORMAT;
++        case EMES_FAT16_NOT_FOUND: return EMES_ERR_FILE_NOT_FOUND;
++        case EMES_FAT16_PATH_NOT_FOUND: return EMES_ERR_PATH_NOT_FOUND;
++        case EMES_FAT16_NO_MORE: return EMES_ERR_NO_MORE_FILES;
++        case EMES_FAT16_SEEK: return EMES_ERR_SEEK;
++        default: return EMES_ERR_IO;
++    }
++}
++
++static void invalidate_image(void) {
++    ++g_controller.image_generation;
++    if (g_controller.image_generation == 0u) g_controller.image_generation = 1u;
++    g_controller.image_mounted = false;
++    memset(g_controller.image_path, 0, sizeof(g_controller.image_path));
++    memset(&g_controller.image_file, 0, sizeof(g_controller.image_file));
++    memset(&g_controller.image, 0, sizeof(g_controller.image));
++    for (uint8_t i = 0u; i < EMES_MAX_OBJECTS; ++i) {
++        if (g_controller.objects[i].kind == OBJECT_IMAGE_DIRECTORY)
++            memset(&g_controller.objects[i], 0, sizeof(g_controller.objects[i]));
++    }
++}
++
++static bool image_file_reader(uint32_t offset, uint8_t *data, uint16_t length, void *context) {
++    (void)context;
++    uint16_t actual = 0u;
++    if (!g_controller.volume_mounted) return false;
++    if (emes_fat16_seek(&g_controller.image_file, offset, 0u) != EMES_FAT16_OK) return false;
++    if (emes_fat16_read(&g_controller.volume, &g_controller.image_file, data, length, &actual) != EMES_FAT16_OK)
++        return false;
++    return actual == length;
++}
++
++static void close_objects(void) {
++    g_controller.volume_mounted = false;
++    memset(&g_controller.volume, 0, sizeof(g_controller.volume));
++    memset(g_controller.objects, 0, sizeof(g_controller.objects));
++    invalidate_image();
++}
++
++static emes_object_t *object_from_handle(uint8_t handle) {
++    if (handle == 0u || handle > EMES_MAX_OBJECTS) return NULL;
++    emes_object_t *object = &g_controller.objects[handle - 1u];
++    return object->kind == OBJECT_NONE ? NULL : object;
++}
++
++static uint8_t allocate_object(emes_object_kind_t kind, emes_object_t **out) {
++    for (uint8_t index = 0u; index < EMES_MAX_OBJECTS; ++index) {
++        emes_object_t *object = &g_controller.objects[index];
++        if (object->kind == OBJECT_NONE) {
++            memset(object, 0, sizeof(*object));
++            object->kind = kind;
++            *out = object;
++            return (uint8_t)(index + 1u);
++        }
++    }
++    *out = NULL;
++    return 0u;
++}
++
++static bool media_object_valid(const emes_object_t *object) {
++    return object != NULL && g_controller.card_present &&
++        g_controller.volume_mounted &&
++        object->media_generation == g_controller.media_generation;
++}
++
++static bool image_object_valid(const emes_object_t *object) {
++    return media_object_valid(object) && g_controller.image_mounted &&
++        object->image_generation == g_controller.image_generation;
++}
++
++static void command_identify(void) {
++    static const uint8_t magic[4] = {'E', '9', 'C', 'T'};
++    uint16_t capabilities = EMES_CAP_RTC | EMES_CAP_LED |
++        EMES_CAP_RAW_SECTOR | EMES_CAP_FAT16 | EMES_CAP_FLOPPY_IMAGE | EMES_CAP_IDE_IMAGE | EMES_CAP_CARD_DETECT |
++        EMES_CAP_HOST_FILE_RO | EMES_CAP_DIAGNOSTIC |
++        EMES_CAP_INTEGRITY_CHECK | EMES_CAP_FAULT_LOG;
++    /* The portable engine is compiled now; advertise write support only when
++       the board-specific writer is deliberately enabled. */
++    if (g_sector_writer != NULL && g_physical_write_enabled) {
++        capabilities = (uint16_t)(capabilities | EMES_CAP_FAT_WRITE | EMES_CAP_VERIFY_WRITE);
++    }
++    fifo_reset();
++    for (size_t i = 0u; i < sizeof(magic); ++i) (void)fifo_write_byte(magic[i]);
++    (void)fifo_write_byte(EMES_CTRL_PROTO_MAJOR);
++    (void)fifo_write_byte(EMES_CTRL_PROTO_MINOR);
++    (void)fifo_write_byte(EMES_CTRL_FW_MAJOR);
++    (void)fifo_write_byte(EMES_CTRL_FW_MINOR);
++    (void)fifo_write_byte(EMES_CTRL_FW_PATCH);
++    (void)fifo_write_byte(1u);
++    fifo_write_be16(capabilities);
++    (void)fifo_write_byte(8u);
++    (void)fifo_write_byte(8u);
++    (void)fifo_write_byte(0u);
++    (void)fifo_write_byte(0u);
++    finish_ok();
++}
++
++static void command_status(void) {
++    fifo_reset();
++    (void)fifo_write_byte(base_status());
++    (void)fifo_write_byte(g_controller.error);
++    fifo_write_be16(g_controller.media_generation);
++    (void)fifo_write_byte(g_controller.led_state);
++    (void)fifo_write_byte(g_controller.battery_low ? 2u : (g_controller.rtc_valid ? 1u : 0u));
++    fifo_write_be16(0u);
++    finish_ok();
++}
++
++static void command_led(void) {
++    g_controller.led_state = (uint8_t)(g_controller.args[0] & 0x0Fu);
++    fifo_reset();
++    (void)fifo_write_byte(g_controller.led_state);
++    finish_ok();
++}
++
++static void command_rtc_get(void) {
++    fifo_reset();
++    for (size_t i = 0u; i < EMES_RTC_SIZE; ++i) (void)fifo_write_byte(g_rtc[i]);
++    finish_ok();
++}
++
++static void command_rtc_set(void) {
++    if (g_controller.fifo_write != EMES_RTC_SIZE) {
++        finish_error(EMES_ERR_BAD_ARGUMENT);
++        return;
++    }
++    for (size_t i = 0u; i < EMES_RTC_SIZE; ++i) g_rtc[i] = g_controller.fifo[i];
++    g_controller.rtc_valid = true;
++    fifo_reset();
++    finish_ok();
++}
++
++static void command_media_status(void) {
++    const uint32_t sectors = g_controller.card_present ? 65536u : 0u;
++    fifo_reset();
++    (void)fifo_write_byte(g_controller.card_present ? 1u : 0u);
++    (void)fifo_write_byte(g_controller.write_protect ? 1u : 0u);
++    (void)fifo_write_byte(g_controller.media_changed ? 1u : 0u);
++    (void)fifo_write_byte(g_controller.card_present ? 2u : 0u);
++    fifo_write_be16(g_controller.media_generation);
++    fifo_write_be16(512u);
++    fifo_write_be32(sectors);
++    finish_ok();
++}
++
++static void write_volume_info(void) {
++    fifo_reset();
++    (void)fifo_write_byte(0u);
++    (void)fifo_write_byte(g_controller.volume.flags);
++    fifo_write_be16(g_controller.volume.bytes_per_sector);
++    (void)fifo_write_byte(g_controller.volume.sectors_per_cluster);
++    (void)fifo_write_byte(g_controller.volume.fat_count);
++    fifo_write_be16(g_controller.volume.reserved_sectors);
++    fifo_write_be16(g_controller.volume.root_entries);
++    fifo_write_be16(g_controller.volume.sectors_per_fat);
++    fifo_write_be32(g_controller.volume.total_sectors);
++    fifo_write_be32(g_controller.volume.volume_serial);
++    for (size_t i = 0u; i < 11u; ++i) (void)fifo_write_byte((uint8_t)g_controller.volume.volume_label[i]);
++    (void)fifo_write_byte(0u);
++    finish_ok();
++}
++
++static void command_volume_mount(void) {
++    if (!g_controller.card_present) {
++        finish_error(EMES_ERR_NO_MEDIA);
++        return;
++    }
++    if (g_controller.args[0] != 0u) {
++        finish_error(EMES_ERR_BAD_ARGUMENT);
++        return;
++    }
++    emes_fat16_result_t result = emes_fat16_mount(
++        &g_controller.volume, platform_sd_read_sector, NULL
++    );
++    if (result != EMES_FAT16_OK) {
++        close_objects();
++        finish_error(map_fat_result(result));
++        return;
++    }
++    g_controller.volume_mounted = true;
++    ++g_controller.cache_misses;
++    g_controller.cache_generation = g_controller.media_generation;
++    write_volume_info();
++}
++
++static void command_volume_info(void) {
++    if (!g_controller.volume_mounted) {
++        finish_error(EMES_ERR_NOT_READY);
++        return;
++    }
++    if (g_controller.args[0] != 0u) {
++        finish_error(EMES_ERR_BAD_ARGUMENT);
++        return;
++    }
++    ++g_controller.cache_hits;
++    write_volume_info();
++}
++
++static void command_cache_status(void) {
++    fifo_reset();
++    fifo_write_be16(g_controller.cache_hits);
++    fifo_write_be16(g_controller.cache_misses);
++    fifo_write_be16(g_controller.retry_count);
++    fifo_write_be16(g_controller.cache_generation);
++    finish_ok();
++}
++
++static void command_write_status(void) {
++    fifo_reset();
++    (void)fifo_write_byte(g_controller.write_protect ? 1u : 0u);
++    (void)fifo_write_byte(0u); /* no dirty object in the board adapter yet */
++    fifo_write_be16(g_controller.sync_count);
++    fifo_write_be16(g_controller.data_cluster_writes);
++    fifo_write_be16(g_controller.fat_entry_writes);
++    fifo_write_be16(g_controller.directory_entry_writes);
++    fifo_write_be16(g_controller.verify_passes);
++    finish_ok();
++}
++
++static void command_sync(void) {
++    if (!g_controller.volume_mounted) {
++        finish_error(EMES_ERR_NOT_READY);
++        return;
++    }
++    if (g_controller.write_protect) {
++        finish_error(EMES_ERR_WRITE_PROTECT);
++        return;
++    }
++    ++g_controller.sync_count;
++    command_write_status();
++}
++
++static void command_write_adapter_pending(void) {
++    /* The protocol and transaction engine are complete. Root/path-to-directory
++       record wiring is intentionally gated on the physical sector writer. */
++    finish_error(g_controller.write_protect ? EMES_ERR_WRITE_PROTECT : EMES_ERR_UNSUPPORTED);
++}
++
++static void command_volume_free(void) {
++    if (!g_controller.volume_mounted) {
++        finish_error(EMES_ERR_NOT_READY);
++        return;
++    }
++    if (g_controller.args[0] != 0u) {
++        finish_error(EMES_ERR_BAD_ARGUMENT);
++        return;
++    }
++    emes_fat16_free_t info;
++    emes_fat16_result_t result = emes_fat16_free_space(&g_controller.volume, &info);
++    if (result != EMES_FAT16_OK) {
++        finish_error(map_fat_result(result));
++        return;
++    }
++    fifo_reset();
++    (void)fifo_write_byte(0u);
++    (void)fifo_write_byte(info.sectors_per_cluster);
++    fifo_write_be16(info.bytes_per_sector);
++    fifo_write_be16(info.free_clusters);
++    fifo_write_be16(info.total_clusters);
++    fifo_write_be32(info.total_sectors);
++    finish_ok();
++}
++
++static void command_volume_unmount(void) {
++    if (!g_controller.volume_mounted) {
++        finish_error(EMES_ERR_BAD_STATE);
++        return;
++    }
++    close_objects();
++    fifo_reset();
++    finish_ok();
++}
++
++static void command_dir_open(void) {
++    char path[EMES_FIFO_SIZE];
++    const uint16_t input_count = g_controller.fifo_write;
++    if (input_count >= sizeof(path)) { finish_error(EMES_ERR_BAD_ARGUMENT); return; }
++    if (input_count == 0u) memcpy(path, "A:\\*.*", sizeof("A:\\*.*"));
++    else {
++        for (uint16_t i = 0u; i < input_count; ++i) path[i] = (char)g_controller.fifo[i];
++        path[input_count] = '\0';
++    }
++    const bool image_path = g_controller.args[0] == 1u ||
++        (path[0] == 'B' && path[1] == ':');
++    if (image_path) {
++        if (!g_controller.image_mounted) { finish_error(EMES_ERR_NOT_READY); return; }
++        emes_object_t *object = NULL;
++        const uint8_t handle = allocate_object(OBJECT_IMAGE_DIRECTORY, &object);
++        if (handle == 0u || object == NULL) { finish_error(EMES_ERR_TOO_MANY_OPEN); return; }
++        emes_coco_result_t result = emes_decb_open_dir(&g_controller.image, &object->image_directory);
++        if (result != EMES_COCO_OK) { memset(object, 0, sizeof(*object)); finish_error(EMES_ERR_INVALID_FORMAT); return; }
++        object->media_generation = g_controller.media_generation;
++        object->image_generation = g_controller.image_generation;
++        fifo_reset();
++        (void)fifo_write_byte(handle);
++        finish_ok();
++        return;
++    }
++    if (!g_controller.volume_mounted) { finish_error(EMES_ERR_NOT_READY); return; }
++    if (g_controller.args[0] != 0u) { finish_error(EMES_ERR_BAD_ARGUMENT); return; }
++    emes_object_t *object = NULL;
++    const uint8_t handle = allocate_object(OBJECT_DIRECTORY, &object);
++    if (handle == 0u || object == NULL) { finish_error(EMES_ERR_TOO_MANY_OPEN); return; }
++    emes_fat16_result_t result = emes_fat16_open_dir(&g_controller.volume, path, &object->directory);
++    if (result != EMES_FAT16_OK) { memset(object, 0, sizeof(*object)); finish_error(map_fat_result(result)); return; }
++    object->media_generation = g_controller.media_generation;
++    fifo_reset();
++    (void)fifo_write_byte(handle);
++    finish_ok();
++}
++
++static void command_dir_read(void) {
++    emes_object_t *object = object_from_handle(g_controller.args[0]);
++    if (object == NULL) { finish_error(EMES_ERR_INVALID_HANDLE); return; }
++    if (object->kind == OBJECT_IMAGE_DIRECTORY) {
++        if (!image_object_valid(object)) { finish_error(EMES_ERR_INVALID_HANDLE); return; }
++        emes_decb_entry_t entry;
++        emes_coco_result_t result = emes_decb_dir_next(&g_controller.image, &object->image_directory, &entry);
++        if (result == EMES_COCO_NO_MORE) { finish_error(EMES_ERR_NO_MORE_FILES); return; }
++        if (result != EMES_COCO_OK) { finish_error(EMES_ERR_INVALID_FORMAT); return; }
++        fifo_reset();
++        (void)fifo_write_byte(0x20u);
++        (void)fifo_write_byte(0u);
++        fifo_write_be16(0u);
++        fifo_write_be16(0u);
++        fifo_write_be32(entry.size);
++        fifo_write_be16(entry.first_granule);
++        for (size_t i = 0u; i < 11u; ++i) (void)fifo_write_byte(entry.alias_raw[i]);
++        for (size_t i = 0u; i < 9u; ++i) (void)fifo_write_byte(0u);
++        finish_ok();
++        return;
++    }
++    if (object->kind != OBJECT_DIRECTORY || !media_object_valid(object)) { finish_error(EMES_ERR_INVALID_HANDLE); return; }
++    emes_fat16_entry_t entry;
++    emes_fat16_result_t result = emes_fat16_dir_next(&g_controller.volume, &object->directory, &entry);
++    if (result != EMES_FAT16_OK) { finish_error(map_fat_result(result)); return; }
++    fifo_reset();
++    (void)fifo_write_byte(entry.attributes);
++    (void)fifo_write_byte(entry.flags);
++    fifo_write_be16(entry.write_time);
++    fifo_write_be16(entry.write_date);
++    fifo_write_be32(entry.size);
++    fifo_write_be16(entry.first_cluster);
++    for (size_t i = 0u; i < 11u; ++i) (void)fifo_write_byte(entry.alias_raw[i]);
++    for (size_t i = 0u; i < 9u; ++i) (void)fifo_write_byte(0u);
++    finish_ok();
++}
++
++static void command_dir_close(void) {
++    emes_object_t *object = object_from_handle(g_controller.args[0]);
++    if (object == NULL ||
++        (object->kind != OBJECT_DIRECTORY && object->kind != OBJECT_IMAGE_DIRECTORY)) {
++        finish_error(EMES_ERR_INVALID_HANDLE); return;
++    }
++    if (object->kind == OBJECT_IMAGE_DIRECTORY ? !image_object_valid(object) : !media_object_valid(object)) {
++        memset(object, 0, sizeof(*object)); finish_error(EMES_ERR_INVALID_HANDLE); return;
++    }
++    memset(object, 0, sizeof(*object));
++    fifo_reset();
++    finish_ok();
++}
++
++static void command_file_open(void) {
++    const uint8_t selector = g_controller.args[0];
++    if (!g_controller.card_present) {
++        finish_error(EMES_ERR_NO_MEDIA);
++        return;
++    }
++    if (selector == EMES_BOOT_FILE_SELECTOR && g_controller.fifo_write == 0u) {
++        emes_object_t *object = NULL;
++        const uint8_t handle = allocate_object(OBJECT_BOOT_CFG, &object);
++        if (handle == 0u || object == NULL) {
++            finish_error(EMES_ERR_TOO_MANY_OPEN);
++            return;
++        }
++        object->boot_file_position = 0u;
++        fifo_reset();
++        (void)fifo_write_byte(handle);
++        (void)fifo_write_byte(0u);
++        fifo_write_be16((uint16_t)(sizeof(g_boot_cfg) - 1u));
++        finish_ok();
++        return;
++    }
++    if (selector != EMES_PATH_FILE_SELECTOR || !g_controller.volume_mounted) {
++        finish_error(selector == EMES_PATH_FILE_SELECTOR ? EMES_ERR_NOT_READY : EMES_ERR_BAD_ARGUMENT);
++        return;
++    }
++    char path[EMES_FIFO_SIZE];
++    const uint16_t input_count = g_controller.fifo_write;
++    if (input_count == 0u || input_count >= sizeof(path)) {
++        finish_error(EMES_ERR_BAD_ARGUMENT);
++        return;
++    }
++    for (uint16_t i = 0u; i < input_count; ++i) path[i] = (char)g_controller.fifo[i];
++    path[input_count] = '\0';
++
++    emes_object_t *object = NULL;
++    const uint8_t handle = allocate_object(OBJECT_FAT16_FILE, &object);
++    if (handle == 0u || object == NULL) {
++        finish_error(EMES_ERR_TOO_MANY_OPEN);
++        return;
++    }
++    emes_fat16_result_t result = emes_fat16_open_path(
++        &g_controller.volume, path, &object->file
++    );
++    if (result != EMES_FAT16_OK) {
++        memset(object, 0, sizeof(*object));
++        finish_error(map_fat_result(result));
++        return;
++    }
++    object->media_generation = g_controller.media_generation;
++    fifo_reset();
++    (void)fifo_write_byte(handle);
++    (void)fifo_write_byte(object->file.entry.attributes);
++    fifo_write_be32(object->file.entry.size);
++    fifo_write_be16(object->file.entry.first_cluster);
++    finish_ok();
++}
++
++static void command_file_read(void) {
++    uint16_t requested = g_controller.count == 0u ? EMES_FIFO_SIZE : g_controller.count;
++    if (requested > EMES_FIFO_SIZE) requested = EMES_FIFO_SIZE;
++    emes_object_t *object = object_from_handle(g_controller.args[0]);
++    if (object == NULL) {
++        finish_error(EMES_ERR_INVALID_HANDLE);
++        return;
++    }
++    if (object->kind == OBJECT_BOOT_CFG) {
++        fifo_reset();
++        for (uint16_t i = 0u; i < requested; ++i) {
++            uint8_t value = 0u;
++            if (object->boot_file_position < (sizeof(g_boot_cfg) - 1u)) {
++                value = g_boot_cfg[object->boot_file_position++];
++            }
++            (void)fifo_write_byte(value);
++        }
++        finish_ok();
++        return;
++    }
++    if (object->kind != OBJECT_FAT16_FILE || !media_object_valid(object)) {
++        finish_error(EMES_ERR_INVALID_HANDLE);
++        return;
++    }
++    uint8_t output[EMES_FIFO_SIZE];
++    uint16_t actual = 0u;
++    emes_fat16_result_t result = emes_fat16_read(
++        &g_controller.volume, &object->file, output, requested, &actual
++    );
++    if (result != EMES_FAT16_OK) {
++        finish_error(map_fat_result(result));
++        return;
++    }
++    g_controller.stream_read_calls++;
++    g_controller.stream_read_bytes += actual;
++    fifo_reset();
++    for (uint16_t i = 0u; i < actual; ++i) (void)fifo_write_byte(output[i]);
++    finish_ok();
++}
++
++static void command_stream_status(void) {
++    fifo_reset();
++    fifo_write_be16(g_controller.stream_read_calls);
++    fifo_write_be16(g_controller.stream_write_calls);
++    fifo_write_be32(g_controller.stream_read_bytes);
++    fifo_write_be32(g_controller.stream_write_bytes);
++    finish_ok();
++}
++
++static void command_file_seek(void) {
++    emes_object_t *object = object_from_handle(g_controller.args[0]);
++    if (object == NULL || object->kind != OBJECT_FAT16_FILE ||
++        !media_object_valid(object) || g_controller.fifo_write != 4u) {
++        finish_error(EMES_ERR_INVALID_HANDLE);
++        return;
++    }
++    uint8_t input[4];
++    for (size_t i = 0u; i < sizeof(input); ++i) input[i] = g_controller.fifo[i];
++    emes_fat16_result_t result = emes_fat16_seek(
++        &object->file, input_be32(input), g_controller.args[1]
++    );
++    if (result != EMES_FAT16_OK) {
++        finish_error(map_fat_result(result));
++        return;
++    }
++    fifo_reset();
++    fifo_write_be32(object->file.position);
++    finish_ok();
++}
++
++static void command_file_stat(void) {
++    emes_object_t *object = object_from_handle(g_controller.args[0]);
++    if (object == NULL || object->kind != OBJECT_FAT16_FILE || !media_object_valid(object)) {
++        finish_error(EMES_ERR_INVALID_HANDLE);
++        return;
++    }
++    const emes_fat16_entry_t *entry = &object->file.entry;
++    fifo_reset();
++    (void)fifo_write_byte(entry->attributes);
++    (void)fifo_write_byte(0u);
++    fifo_write_be16(entry->create_time);
++    fifo_write_be16(entry->create_date);
++    fifo_write_be16(entry->write_time);
++    fifo_write_be16(entry->write_date);
++    fifo_write_be16(entry->first_cluster);
++    fifo_write_be32(entry->size);
++    fifo_write_be32(object->file.position);
++    finish_ok();
++}
++
++static void command_file_close(void) {
++    emes_object_t *object = object_from_handle(g_controller.args[0]);
++    if (object == NULL) {
++        finish_error(EMES_ERR_INVALID_HANDLE);
++        return;
++    }
++    if ((object->kind == OBJECT_FAT16_FILE || object->kind == OBJECT_DIRECTORY) &&
++        !media_object_valid(object)) {
++        memset(object, 0, sizeof(*object));
++        finish_error(EMES_ERR_INVALID_HANDLE);
++        return;
++    }
++    memset(object, 0, sizeof(*object));
++    fifo_reset();
++    finish_ok();
++}
++
++
++static uint8_t map_coco_result(emes_coco_result_t result) {
++    if (result == EMES_COCO_OK) return EMES_ERR_OK;
++    if (result == EMES_COCO_IO) return EMES_ERR_IO;
++    if (result == EMES_COCO_SEEK) return EMES_ERR_SEEK;
++    if (result == EMES_COCO_NO_MORE) return EMES_ERR_NO_MORE_FILES;
++    return EMES_ERR_INVALID_FORMAT;
++}
++
++static void command_image_mount(void) {
++    if (!g_controller.volume_mounted) { finish_error(EMES_ERR_NOT_READY); return; }
++    if (g_controller.args[0] != 1u || g_controller.fifo_write == 0u ||
++        g_controller.fifo_write >= sizeof(g_controller.image_path)) {
++        finish_error(EMES_ERR_BAD_ARGUMENT); return;
++    }
++    char path[80];
++    uint16_t length = 0u;
++    while (length < g_controller.fifo_write && length < sizeof(path) - 1u && g_controller.fifo[length] != 0u) {
++        path[length] = (char)g_controller.fifo[length]; ++length;
++    }
++    path[length] = '\0';
++    emes_fat16_file_t file;
++    emes_fat16_result_t fat = emes_fat16_open_path(&g_controller.volume, path, &file);
++    if (fat != EMES_FAT16_OK) { finish_error(map_fat_result(fat)); return; }
++    invalidate_image();
++    g_controller.image_file = file;
++    emes_coco_result_t result = emes_coco_image_mount(
++        &g_controller.image, image_file_reader, NULL, file.entry.size, g_controller.image_generation
++    );
++    if (result != EMES_COCO_OK) { invalidate_image(); finish_error(map_coco_result(result)); return; }
++    emes_decb_dir_t directory;
++    emes_decb_entry_t entry;
++    result = emes_decb_open_dir(&g_controller.image, &directory);
++    while (result == EMES_COCO_OK) result = emes_decb_dir_next(&g_controller.image, &directory, &entry);
++    if (result != EMES_COCO_NO_MORE) { invalidate_image(); finish_error(map_coco_result(result)); return; }
++    memcpy(g_controller.image_path, path, length + 1u);
++    g_controller.image_mounted = true;
++    uint8_t info[EMES_IMAGE_INFO_SIZE];
++    emes_coco_image_info(&g_controller.image, g_controller.image_path, info);
++    fifo_reset();
++    for (uint8_t i = 0u; i < EMES_IMAGE_INFO_SIZE; ++i) (void)fifo_write_byte(info[i]);
++    finish_ok();
++}
++
++static void command_image_unmount(void) {
++    if (g_controller.args[0] != 1u) { finish_error(EMES_ERR_BAD_ARGUMENT); return; }
++    if (!g_controller.image_mounted) { finish_error(EMES_ERR_BAD_STATE); return; }
++    invalidate_image();
++    fifo_reset();
++    finish_ok();
++}
++
++static void command_image_list(void) {
++    if (g_controller.args[0] != 1u) { finish_error(EMES_ERR_BAD_ARGUMENT); return; }
++    if (!g_controller.image_mounted) { finish_error(EMES_ERR_NOT_READY); return; }
++    uint8_t info[EMES_IMAGE_INFO_SIZE];
++    emes_coco_image_info(&g_controller.image, g_controller.image_path, info);
++    fifo_reset();
++    for (uint8_t i = 0u; i < EMES_IMAGE_INFO_SIZE; ++i) (void)fifo_write_byte(info[i]);
++    finish_ok();
++}
++
++static void command_image_sector_read(void) {
++    if (!g_controller.image_mounted) { finish_error(EMES_ERR_NOT_READY); return; }
++    if (g_controller.args[0] != 1u) { finish_error(EMES_ERR_BAD_ARGUMENT); return; }
++    uint8_t sector[256];
++    emes_coco_result_t result = emes_coco_read_sector(
++        &g_controller.image, g_controller.args[1], g_controller.args[2], g_controller.args[3], sector
++    );
++    if (result != EMES_COCO_OK) { finish_error(map_coco_result(result)); return; }
++    fifo_reset();
++    for (uint16_t i = 0u; i < 256u; ++i) (void)fifo_write_byte(sector[i]);
++    finish_ok();
++}
++
++static void command_integrity_check(void) {
++    if (!g_controller.card_present || !g_controller.volume_mounted) {
++        finish_error(g_controller.card_present ? EMES_ERR_NOT_READY : EMES_ERR_NO_MEDIA);
++        return;
++    }
++    emes_fat16_check_report_t report;
++    emes_fat16_result_t result = emes_fat16_check_volume(
++        &g_controller.volume, g_controller.media_generation, &report
++    );
++    if (result != EMES_FAT16_OK) {
++        finish_error(map_fat_result(result));
++        return;
++    }
++    fifo_reset();
++    (void)fifo_write_byte(report.flags);
++    (void)fifo_write_byte(report.version);
++    fifo_write_be16(report.errors);
++    fifo_write_be16(report.warnings);
++    fifo_write_be16(report.files);
++    fifo_write_be16(report.directories);
++    fifo_write_be16(report.used_clusters);
++    fifo_write_be16(report.free_clusters);
++    fifo_write_be16(report.lost_clusters);
++    fifo_write_be16(report.crosslinked_clusters);
++    fifo_write_be16(report.loop_chains);
++    fifo_write_be16(report.invalid_clusters);
++    fifo_write_be16(report.bad_clusters);
++    fifo_write_be16(report.fat_mismatches);
++    fifo_write_be16(report.truncated_files);
++    fifo_write_be16(report.total_clusters);
++    fifo_write_be16(report.media_generation);
++    finish_ok();
++}
++
++static void command_fault_log_read(void) {
++    const uint8_t index = g_controller.args[0];
++    if (index >= g_controller.transaction_log_count) {
++        finish_error(EMES_ERR_NO_MORE_FILES);
++        return;
++    }
++    fifo_reset();
++    for (uint8_t i = 0u; i < EMES_FAULT_LOG_RECORD_SIZE; ++i) {
++        (void)fifo_write_byte(g_controller.transaction_log[index][i]);
++    }
++    finish_ok();
++}
++
++static void command_fault_log_clear(void) {
++    memset(g_controller.transaction_log, 0, sizeof(g_controller.transaction_log));
++    g_controller.transaction_log_count = 0u;
++    g_controller.transaction_sequence = 0u;
++    fifo_reset();
++    finish_ok();
++}
++
++static void put_be16(uint8_t *destination, uint16_t value) {
++    destination[0] = (uint8_t)(value >> 8);
++    destination[1] = (uint8_t)value;
++}
++
++static void record_transaction(uint8_t command, uint16_t request_count) {
++    if (command == EMES_CMD_FAULT_LOG_CLEAR) return;
++    if (g_controller.transaction_log_count >= 16u) {
++        memmove(g_controller.transaction_log[0], g_controller.transaction_log[1],
++            15u * EMES_FAULT_LOG_RECORD_SIZE);
++        g_controller.transaction_log_count = 15u;
++    }
++    uint8_t *record = g_controller.transaction_log[g_controller.transaction_log_count++];
++    memset(record, 0, EMES_FAULT_LOG_RECORD_SIZE);
++    ++g_controller.transaction_sequence;
++    if (g_controller.transaction_sequence == 0u) g_controller.transaction_sequence = 1u;
++    put_be16(&record[0], g_controller.transaction_sequence);
++    record[2] = command;
++    record[3] = g_controller.error;
++    record[4] = g_controller.status;
++    record[5] = base_status();
++    put_be16(&record[6], g_controller.media_generation);
++    put_be16(&record[8], request_count);
++    put_be16(&record[10], g_controller.count);
++}
++
++static void dispatch_command(uint8_t command) {
++    const uint16_t request_count = g_controller.count;
++    g_controller.status = (uint8_t)(base_status() | EMES_ST_BUSY);
++    g_controller.error = EMES_ERR_OK;
++    switch (command) {
++        case EMES_CMD_IDENTIFY: command_identify(); break;
++        case EMES_CMD_STATUS: command_status(); break;
++        case EMES_CMD_RESET:
++            g_controller.led_state = 0u;
++            g_controller.media_changed = false;
++            close_objects();
++            fifo_reset();
++            finish_ok();
++            break;
++        case EMES_CMD_LED: command_led(); break;
++        case EMES_CMD_RTC_GET: command_rtc_get(); break;
++        case EMES_CMD_RTC_SET: command_rtc_set(); break;
++        case EMES_CMD_MEDIA_STATUS: command_media_status(); break;
++        case EMES_CMD_VOLUME_MOUNT: command_volume_mount(); break;
++        case EMES_CMD_VOLUME_UNMOUNT: command_volume_unmount(); break;
++        case EMES_CMD_VOLUME_FREE: command_volume_free(); break;
++        case EMES_CMD_VOLUME_INFO: command_volume_info(); break;
++        case EMES_CMD_CACHE_STATUS: command_cache_status(); break;
++        case EMES_CMD_WRITE_STATUS: command_write_status(); break;
++        case EMES_CMD_STREAM_STATUS: command_stream_status(); break;
++        case EMES_CMD_INTEGRITY_CHECK: command_integrity_check(); break;
++        case EMES_CMD_FAULT_LOG_READ: command_fault_log_read(); break;
++        case EMES_CMD_FAULT_LOG_CLEAR: command_fault_log_clear(); break;
++        case EMES_CMD_IMAGE_MOUNT: command_image_mount(); break;
++        case EMES_CMD_IMAGE_UNMOUNT: command_image_unmount(); break;
++        case EMES_CMD_IMAGE_LIST: command_image_list(); break;
++        case EMES_CMD_IMAGE_SECTOR_READ: command_image_sector_read(); break;
++        case EMES_CMD_DIR_OPEN: command_dir_open(); break;
++        case EMES_CMD_DIR_READ: command_dir_read(); break;
++        case EMES_CMD_DIR_CLOSE: command_dir_close(); break;
++        case EMES_CMD_FILE_OPEN: command_file_open(); break;
++        case EMES_CMD_FILE_READ: command_file_read(); break;
++        case EMES_CMD_FILE_SEEK: command_file_seek(); break;
++        case EMES_CMD_FILE_STAT: command_file_stat(); break;
++        case EMES_CMD_FILE_CLOSE: command_file_close(); break;
++        case EMES_CMD_SYNC: command_sync(); break;
++        case EMES_CMD_FILE_CREATE:
++        case EMES_CMD_FILE_WRITE:
++        case EMES_CMD_FILE_TRUNCATE:
++        case EMES_CMD_FILE_CREATE_NEW:
++        case EMES_CMD_FILE_CREATE_TEMP:
++        case EMES_CMD_FILE_ABORT:
++        case EMES_CMD_SECTOR_WRITE:
++            command_write_adapter_pending();
++            break;
++        default:
++            finish_error(EMES_ERR_BAD_COMMAND);
++            break;
++    }
++    record_transaction(command, request_count);
++}
++
++/* ---- XRoar adapter (not in the firmware) ---------------------------------
++ * The cartridge's $FF40-$FF4F register block, as EMULATOR-CONTRACT.md and
++ * SOFTWARE/emulator/xroar-smartcart describe it, in front of the firmware's
++ * own command code above.  Commands complete at once (the contract allows
++ * immediate completion). */
++
++static uint8_t g_bank;
++bool emes_fw_trace;   /* log every command to stderr (EMESDOS09_TRACE) */
++
++void emes_fw_init(void) {
++    memset(&g_controller, 0, sizeof(g_controller));
++    g_controller.error = EMES_ERR_OK;
++    g_controller.media_generation = 1u;
++    g_controller.image_generation = 1u;
++    g_controller.rtc_valid = true;
++    g_controller.card_present = false;
++    g_controller.cache_generation = g_controller.media_generation;
++    g_controller.status = base_status();
++    fifo_reset();
++    g_bank = 0u;
++}
++
++/* An SD card was inserted or taken out (or replaced). */
++void emes_fw_set_media(bool present, bool write_protect) {
++    close_objects();
++    g_controller.card_present = present;
++    g_controller.write_protect = write_protect;
++    g_controller.media_changed = true;
++    ++g_controller.media_generation;
++    if (g_controller.media_generation == 0u) g_controller.media_generation = 1u;
++    g_controller.status = base_status();
++}
++
++void emes_fw_set_rtc(const uint8_t rtc[EMES_RTC_SIZE]) {
++    memcpy(g_rtc, rtc, EMES_RTC_SIZE);
++    g_controller.rtc_valid = true;
++}
++
++/* Bit 7 of $FF40: which 8K ROM bank shows at $C000-$DFFF. */
++uint8_t emes_fw_bank(void) {
++    return g_bank;
++}
++
++uint8_t emes_fw_read(unsigned reg) {
++    switch (reg & 15u) {
++    case 0x0: return (uint8_t)(g_bank ? 0x80u : 0x00u);
++    case 0x1: return g_controller.status;
++    case 0x2: return g_controller.fifo_read < g_controller.fifo_write ? g_controller.fifo[g_controller.fifo_read++] : 0u;
++    case 0x3: return g_controller.error;
++    case 0x4: case 0x5: case 0x6: case 0x7:
++    case 0x8: case 0x9: case 0xA: case 0xB: return g_controller.args[(reg & 15u) - 4u];
++    case 0xC: return (uint8_t)(g_controller.count >> 8);
++    case 0xD: return (uint8_t)g_controller.count;
++    case 0xE: return (uint8_t)(EMES_CAP_RTC | EMES_CAP_LED | EMES_CAP_RAW_SECTOR | EMES_CAP_FAT16);
++    default: return 0xFFu;
++    }
++}
++
++void emes_fw_write(unsigned reg, uint8_t value) {
++    switch (reg & 15u) {
++    case 0x0:
++        g_bank = (value & 0x80u) ? 1u : 0u;
++        if (value & 0x7Fu) {
++            /* the command reads its input from the FIFO from the start */
++            g_controller.fifo_read = 0u;
++            if (emes_fw_trace) {
++                fprintf(stderr, "emesdos09: cmd %02X args %02X %02X %02X %02X count %u in[%u]",
++                    value & 0x7Fu, g_controller.args[0], g_controller.args[1], g_controller.args[2],
++                    g_controller.args[3], (unsigned)g_controller.count, (unsigned)g_controller.fifo_write);
++                for (uint16_t i = 0u; i < g_controller.fifo_write && i < 40u; ++i) {
++                    uint8_t ch = g_controller.fifo[i];
++                    fputc(ch >= 32u && ch < 127u ? ch : '.', stderr);
++                }
++            }
++            dispatch_command((uint8_t)(value & 0x7Fu));
++            g_controller.fifo_read = 0u;
++            if (emes_fw_trace) {
++                fprintf(stderr, " -> status %02X error %02X out %u\n", g_controller.status, g_controller.error,
++                    (unsigned)g_controller.fifo_write);
++            }
++        }
++        break;
++    case 0x2:
++        if (g_controller.fifo_write < EMES_FIFO_SIZE) g_controller.fifo[g_controller.fifo_write++] = value;
++        break;
++    case 0x4: case 0x5: case 0x6: case 0x7:
++    case 0x8: case 0x9: case 0xA: case 0xB:
++        g_controller.args[(reg & 15u) - 4u] = value;
++        break;
++    case 0xC: g_controller.count = (uint16_t)((g_controller.count & 0x00FFu) | ((uint16_t)value << 8)); break;
++    case 0xD: g_controller.count = (uint16_t)((g_controller.count & 0xFF00u) | value); break;
++    case 0xF:   /* acknowledge */
++        fifo_reset();
++        g_controller.error = EMES_ERR_OK;
++        g_controller.status = base_status();
++        break;
++    default:
++        break;
++    }
++}
+diff --git a/src/emesdos09/emes_fw.h b/src/emesdos09/emes_fw.h
+new file mode 100644
+index 00000000..8817f43b
+--- /dev/null
++++ b/src/emesdos09/emes_fw.h
+@@ -0,0 +1,20 @@
++/* XRoar side of the emesDOS09 controller model (emes_fw.c). */
++#ifndef XROAR_EMESDOS09_EMES_FW_H_
++#define XROAR_EMESDOS09_EMES_FW_H_
++
++#include <stdbool.h>
++#include <stdint.h>
++
++extern bool emes_fw_trace;
++void emes_fw_init(void);
++void emes_fw_set_media(bool present, bool write_protect);
++void emes_fw_set_rtc(const uint8_t rtc[8]);
++uint8_t emes_fw_bank(void);
++uint8_t emes_fw_read(unsigned reg);
++void emes_fw_write(unsigned reg, uint8_t value);
++
++/* Provided by the cartridge (emesdos09.c): 512-byte sectors of the SD image. */
++bool emes_host_read_sector(uint32_t lba, uint8_t *sector);
++bool emes_host_write_sector(uint32_t lba, const uint8_t *sector);
++
++#endif
+diff --git a/src/emesdos09/fat16_check.c b/src/emesdos09/fat16_check.c
+new file mode 100644
+index 00000000..2e4dee75
+--- /dev/null
++++ b/src/emesdos09/fat16_check.c
+@@ -0,0 +1,137 @@
++#include "fat16_check.h"
++
++#include <stddef.h>
++#include <string.h>
++
++static bool read_fat_entry(
++    const emes_fat16_volume_t *volume,
++    uint8_t fat_index,
++    uint16_t cluster,
++    uint16_t *value
++) {
++    uint8_t sector[EMES_FAT16_SECTOR_SIZE];
++    const uint32_t offset = (uint32_t)cluster * 2u;
++    const uint32_t lba = volume->fat_lba +
++        (uint32_t)fat_index * volume->sectors_per_fat +
++        offset / EMES_FAT16_SECTOR_SIZE;
++    const uint16_t within = (uint16_t)(offset % EMES_FAT16_SECTOR_SIZE);
++    if (!volume->read_sector(lba, sector, volume->context)) return false;
++    if (within == EMES_FAT16_SECTOR_SIZE - 1u) {
++        uint8_t next[EMES_FAT16_SECTOR_SIZE];
++        if (!volume->read_sector(lba + 1u, next, volume->context)) return false;
++        *value = (uint16_t)sector[within] | ((uint16_t)next[0] << 8);
++    } else {
++        *value = (uint16_t)sector[within] | ((uint16_t)sector[within + 1u] << 8);
++    }
++    return true;
++}
++
++emes_fat16_result_t emes_fat16_check_chain(
++    const emes_fat16_volume_t *volume,
++    uint16_t first_cluster,
++    uint16_t *cluster_count,
++    bool *loop_detected
++) {
++    if (volume == NULL || cluster_count == NULL || loop_detected == NULL) {
++        return EMES_FAT16_INVALID;
++    }
++    *cluster_count = 0u;
++    *loop_detected = false;
++    if (first_cluster < 2u || first_cluster >= volume->cluster_count + 2u) {
++        return EMES_FAT16_INVALID;
++    }
++    uint16_t cluster = first_cluster;
++    /* Floyd cycle detection avoids a RAM bitmap on the small PIC32 target. */
++    uint16_t slow = first_cluster;
++    uint16_t fast = first_cluster;
++    bool fast_active = true;
++    for (;;) {
++        uint16_t next;
++        if (!read_fat_entry(volume, 0u, cluster, &next)) return EMES_FAT16_IO;
++        ++*cluster_count;
++        if (*cluster_count > volume->cluster_count) {
++            *loop_detected = true;
++            return EMES_FAT16_INVALID;
++        }
++        if (next >= 0xFFF8u) return EMES_FAT16_OK;
++        if (next == 0xFFF7u || next < 2u || next >= volume->cluster_count + 2u ||
++            (next >= 0xFFF0u && next <= 0xFFF6u)) {
++            return EMES_FAT16_INVALID;
++        }
++        cluster = next;
++
++        if (fast_active) {
++            uint16_t slow_next;
++            if (!read_fat_entry(volume, 0u, slow, &slow_next)) return EMES_FAT16_IO;
++            slow = slow_next;
++            for (uint8_t step = 0u; step < 2u; ++step) {
++                uint16_t fast_next;
++                if (!read_fat_entry(volume, 0u, fast, &fast_next)) return EMES_FAT16_IO;
++                if (fast_next >= 0xFFF8u) {
++                    fast_active = false;
++                    break;
++                }
++                if (fast_next == 0xFFF7u || fast_next < 2u ||
++                    fast_next >= volume->cluster_count + 2u) {
++                    fast_active = false;
++                    break;
++                }
++                fast = fast_next;
++            }
++            if (fast_active && slow == fast) {
++                *loop_detected = true;
++                return EMES_FAT16_INVALID;
++            }
++        }
++    }
++}
++
++emes_fat16_result_t emes_fat16_check_volume(
++    const emes_fat16_volume_t *volume,
++    uint16_t media_generation,
++    emes_fat16_check_report_t *report
++) {
++    if (volume == NULL || report == NULL || volume->read_sector == NULL) {
++        return EMES_FAT16_INVALID;
++    }
++    memset(report, 0, sizeof(*report));
++    report->version = 1u;
++    report->media_generation = media_generation;
++    report->total_clusters = (uint16_t)volume->cluster_count;
++
++    for (uint32_t cluster32 = 2u; cluster32 < volume->cluster_count + 2u; ++cluster32) {
++        const uint16_t cluster = (uint16_t)cluster32;
++        uint16_t primary;
++        if (!read_fat_entry(volume, 0u, cluster, &primary)) return EMES_FAT16_IO;
++        for (uint8_t fat = 1u; fat < volume->fat_count; ++fat) {
++            uint16_t copy;
++            if (!read_fat_entry(volume, fat, cluster, &copy)) return EMES_FAT16_IO;
++            if (copy != primary) ++report->fat_mismatches;
++        }
++        if (primary == 0u) {
++            ++report->free_clusters;
++        } else {
++            ++report->used_clusters;
++            if (primary == 0xFFF7u) {
++                ++report->bad_clusters;
++            } else if (primary < 2u ||
++                       (primary > (uint16_t)(volume->cluster_count + 1u) && primary < 0xFFF8u) ||
++                       (primary >= 0xFFF0u && primary <= 0xFFF6u)) {
++                ++report->invalid_clusters;
++            }
++        }
++    }
++
++    report->errors = (uint16_t)(report->fat_mismatches + report->bad_clusters +
++        report->invalid_clusters);
++    if (report->free_clusters == 0u) {
++        report->flags |= EMES_CHECK_FLAG_FULL;
++        report->warnings = 1u;
++    }
++    if (report->fat_mismatches != 0u) report->flags |= EMES_CHECK_FLAG_FAT_MISMATCH;
++    if (report->bad_clusters != 0u || report->invalid_clusters != 0u) {
++        report->flags |= EMES_CHECK_FLAG_INVALID;
++    }
++    if (report->errors == 0u) report->flags |= EMES_CHECK_FLAG_CLEAN;
++    return EMES_FAT16_OK;
++}
+diff --git a/src/emesdos09/fat16_check.h b/src/emesdos09/fat16_check.h
+new file mode 100644
+index 00000000..969f3bf8
+--- /dev/null
++++ b/src/emesdos09/fat16_check.h
+@@ -0,0 +1,56 @@
++#ifndef EMESDOS09_FAT16_CHECK_H
++#define EMESDOS09_FAT16_CHECK_H
++
++#include <stdbool.h>
++#include <stdint.h>
++
++#include "fat16_ro.h"
++
++#define EMES_CHECK_FLAG_CLEAN        0x01u
++#define EMES_CHECK_FLAG_FULL         0x02u
++#define EMES_CHECK_FLAG_FAT_MISMATCH 0x04u
++#define EMES_CHECK_FLAG_LOOP         0x08u
++#define EMES_CHECK_FLAG_INVALID      0x10u
++#define EMES_CHECK_FLAG_LOST         0x20u
++#define EMES_CHECK_FLAG_CROSSLINK    0x40u
++#define EMES_CHECK_FLAG_TRUNCATED    0x80u
++
++typedef struct {
++    uint8_t flags;
++    uint8_t version;
++    uint16_t errors;
++    uint16_t warnings;
++    uint16_t files;
++    uint16_t directories;
++    uint16_t used_clusters;
++    uint16_t free_clusters;
++    uint16_t lost_clusters;
++    uint16_t crosslinked_clusters;
++    uint16_t loop_chains;
++    uint16_t invalid_clusters;
++    uint16_t bad_clusters;
++    uint16_t fat_mismatches;
++    uint16_t truncated_files;
++    uint16_t total_clusters;
++    uint16_t media_generation;
++} emes_fat16_check_report_t;
++
++/* Read-only first-pass integrity scan. This portable layer compares every FAT
++ * copy and validates every FAT entry. The controller path layer supplies
++ * reachable-chain ownership counts as it enumerates directories. */
++emes_fat16_result_t emes_fat16_check_volume(
++    const emes_fat16_volume_t *volume,
++    uint16_t media_generation,
++    emes_fat16_check_report_t *report
++);
++
++/* Validate one chain while detecting loops, invalid transitions, and bad
++ * clusters. The caller may use this during recursive directory traversal. */
++emes_fat16_result_t emes_fat16_check_chain(
++    const emes_fat16_volume_t *volume,
++    uint16_t first_cluster,
++    uint16_t *cluster_count,
++    bool *loop_detected
++);
++
++#endif
+diff --git a/src/emesdos09/fat16_meta.c b/src/emesdos09/fat16_meta.c
+new file mode 100644
+index 00000000..52b2603b
+--- /dev/null
++++ b/src/emesdos09/fat16_meta.c
+@@ -0,0 +1,134 @@
++#include "fat16_meta.h"
++
++#include <stddef.h>
++#include <string.h>
++
++static void put_le16(uint8_t *data, uint16_t value) {
++    data[0] = (uint8_t)value;
++    data[1] = (uint8_t)(value >> 8);
++}
++
++static bool valid_day(uint16_t year, uint8_t month, uint8_t day) {
++    static const uint8_t days[12] = {31u,28u,31u,30u,31u,30u,31u,31u,30u,31u,30u,31u};
++    if (month == 0u || month > 12u || day == 0u) return false;
++    uint8_t limit = days[month - 1u];
++    const bool leap = (year % 4u == 0u) && ((year % 100u != 0u) || (year % 400u == 0u));
++    if (month == 2u && leap) ++limit;
++    return day <= limit;
++}
++
++bool emes_fat16_pack_datetime(
++    uint16_t year, uint8_t month, uint8_t day,
++    uint8_t hour, uint8_t minute, uint8_t second,
++    emes_fat16_dos_datetime_t *out
++) {
++    if (out == NULL || year < 1980u || year > 2107u ||
++        !valid_day(year, month, day) || hour > 23u || minute > 59u || second > 59u) {
++        return false;
++    }
++    out->date = (uint16_t)(((year - 1980u) << 9) | ((uint16_t)month << 5) | day);
++    out->time = (uint16_t)(((uint16_t)hour << 11) | ((uint16_t)minute << 5) | (second / 2u));
++    return true;
++}
++
++emes_fat16_dos_datetime_t emes_fat16_epoch_datetime(void) {
++    emes_fat16_dos_datetime_t value = {0u, 0x0021u};
++    return value;
++}
++
++static emes_fat16_rw_result_t load_entry_sector(
++    const emes_fat16_volume_t *volume,
++    emes_fat16_entry_location_t location,
++    uint8_t sector[EMES_FAT16_SECTOR_SIZE]
++) {
++    if (volume == NULL || location.offset > EMES_FAT16_SECTOR_SIZE - 32u ||
++        !volume->read_sector(location.lba, sector, volume->context)) {
++        return EMES_FAT16_RW_IO;
++    }
++    return EMES_FAT16_RW_OK;
++}
++
++emes_fat16_rw_result_t emes_fat16_meta_update(
++    const emes_fat16_volume_t *volume,
++    emes_fat16_sector_writer_t writer,
++    void *io_context,
++    emes_fat16_entry_location_t location,
++    uint8_t attributes,
++    emes_fat16_dos_datetime_t modified
++) {
++    uint8_t sector[EMES_FAT16_SECTOR_SIZE];
++    if (writer == NULL) return EMES_FAT16_RW_INVALID;
++    emes_fat16_rw_result_t result = load_entry_sector(volume, location, sector);
++    if (result != EMES_FAT16_RW_OK) return result;
++    uint8_t *entry = &sector[location.offset];
++    if (entry[0] == 0u || entry[0] == 0xE5u || entry[11] == 0x0Fu) return EMES_FAT16_RW_INVALID;
++    entry[11] = (uint8_t)(attributes & 0x3Fu);
++    put_le16(&entry[22], modified.time);
++    put_le16(&entry[24], modified.date);
++    return writer(location.lba, sector, io_context) ? EMES_FAT16_RW_OK : EMES_FAT16_RW_IO;
++}
++
++emes_fat16_rw_result_t emes_fat16_meta_delete(
++    const emes_fat16_volume_t *volume,
++    emes_fat16_sector_writer_t writer,
++    void *io_context,
++    emes_fat16_entry_location_t location
++) {
++    uint8_t sector[EMES_FAT16_SECTOR_SIZE];
++    if (writer == NULL) return EMES_FAT16_RW_INVALID;
++    emes_fat16_rw_result_t result = load_entry_sector(volume, location, sector);
++    if (result != EMES_FAT16_RW_OK) return result;
++    if (sector[location.offset] == 0u || sector[location.offset] == 0xE5u) return EMES_FAT16_RW_INVALID;
++    sector[location.offset] = 0xE5u;
++    return writer(location.lba, sector, io_context) ? EMES_FAT16_RW_OK : EMES_FAT16_RW_IO;
++}
++
++static void make_dot_entry(
++    uint8_t entry[32], bool parent, uint16_t cluster,
++    emes_fat16_dos_datetime_t timestamp
++) {
++    memset(entry, 0, 32u);
++    memset(entry, ' ', 11u);
++    entry[0] = '.';
++    if (parent) entry[1] = '.';
++    entry[11] = EMES_FAT16_ATTR_DIRECTORY;
++    put_le16(&entry[14], timestamp.time);
++    put_le16(&entry[16], timestamp.date);
++    put_le16(&entry[22], timestamp.time);
++    put_le16(&entry[24], timestamp.date);
++    put_le16(&entry[26], cluster);
++}
++
++emes_fat16_rw_result_t emes_fat16_meta_init_directory(
++    emes_fat16_sector_writer_t writer,
++    void *io_context,
++    uint32_t first_lba,
++    uint16_t self_cluster,
++    uint16_t parent_cluster,
++    emes_fat16_dos_datetime_t timestamp
++) {
++    uint8_t sector[EMES_FAT16_SECTOR_SIZE];
++    if (writer == NULL || self_cluster < 2u) return EMES_FAT16_RW_INVALID;
++    memset(sector, 0, sizeof(sector));
++    make_dot_entry(&sector[0], false, self_cluster, timestamp);
++    make_dot_entry(&sector[32], true, parent_cluster, timestamp);
++    return writer(first_lba, sector, io_context) ? EMES_FAT16_RW_OK : EMES_FAT16_RW_IO;
++}
++
++bool emes_fat16_meta_label11(const char *label, uint8_t output[11]) {
++    if (label == NULL || output == NULL) return false;
++    memset(output, ' ', 11u);
++    size_t count = 0u;
++    while (*label != '\0') {
++        unsigned char value = (unsigned char)*label++;
++        if (value == ' ') continue;
++        if (count >= 11u || value < 0x21u || value > 0x7Eu ||
++            value == '"' || value == '*' || value == '+' || value == ',' ||
++            value == '/' || value == ':' || value == ';' || value == '<' ||
++            value == '=' || value == '>' || value == '?' || value == '[' ||
++            value == '\\' || value == ']' || value == '|') return false;
++        if (value >= 'a' && value <= 'z') value = (unsigned char)(value - ('a' - 'A'));
++        output[count++] = (uint8_t)value;
++    }
++    return count != 0u;
++}
+diff --git a/src/emesdos09/fat16_meta.h b/src/emesdos09/fat16_meta.h
+new file mode 100644
+index 00000000..10f5e234
+--- /dev/null
++++ b/src/emesdos09/fat16_meta.h
+@@ -0,0 +1,69 @@
++#ifndef EMESDOS09_FAT16_META_H
++#define EMESDOS09_FAT16_META_H
++
++#include <stdbool.h>
++#include <stdint.h>
++
++#include "fat16_ro.h"
++#include "fat16_rw.h"
++
++#define EMES_FAT16_ATTR_READONLY  0x01u
++#define EMES_FAT16_ATTR_HIDDEN    0x02u
++#define EMES_FAT16_ATTR_SYSTEM    0x04u
++#define EMES_FAT16_ATTR_VOLUME    0x08u
++#define EMES_FAT16_ATTR_DIRECTORY 0x10u
++#define EMES_FAT16_ATTR_ARCHIVE   0x20u
++
++typedef struct {
++    uint32_t lba;
++    uint16_t offset;
++} emes_fat16_entry_location_t;
++
++typedef struct {
++    uint16_t time;
++    uint16_t date;
++} emes_fat16_dos_datetime_t;
++
++/* Pack a validated Gregorian timestamp into DOS/FAT local date and time. */
++bool emes_fat16_pack_datetime(
++    uint16_t year, uint8_t month, uint8_t day,
++    uint8_t hour, uint8_t minute, uint8_t second,
++    emes_fat16_dos_datetime_t *out
++);
++
++/* Use 1980-01-01 00:00:00 when the hardware RTC is invalid. */
++emes_fat16_dos_datetime_t emes_fat16_epoch_datetime(void);
++
++/* Update a resolved short directory entry. LFN slots are owned by the caller. */
++emes_fat16_rw_result_t emes_fat16_meta_update(
++    const emes_fat16_volume_t *volume,
++    emes_fat16_sector_writer_t writer,
++    void *io_context,
++    emes_fat16_entry_location_t location,
++    uint8_t attributes,
++    emes_fat16_dos_datetime_t modified
++);
++
++/* Mark a resolved short entry deleted. Associated LFN slots are supplied by
++ * repeated calls from the path layer before this short entry is removed. */
++emes_fat16_rw_result_t emes_fat16_meta_delete(
++    const emes_fat16_volume_t *volume,
++    emes_fat16_sector_writer_t writer,
++    void *io_context,
++    emes_fat16_entry_location_t location
++);
++
++/* Initialize the first sector of a new directory with '.' and '..'. */
++emes_fat16_rw_result_t emes_fat16_meta_init_directory(
++    emes_fat16_sector_writer_t writer,
++    void *io_context,
++    uint32_t first_lba,
++    uint16_t self_cluster,
++    uint16_t parent_cluster,
++    emes_fat16_dos_datetime_t timestamp
++);
++
++/* Normalize an ASCII label into an 11-byte space-padded FAT label. */
++bool emes_fat16_meta_label11(const char *label, uint8_t output[11]);
++
++#endif
+diff --git a/src/emesdos09/fat16_ro.c b/src/emesdos09/fat16_ro.c
+new file mode 100644
+index 00000000..6c4fe800
+--- /dev/null
++++ b/src/emesdos09/fat16_ro.c
+@@ -0,0 +1,505 @@
++#include "fat16_ro.h"
++
++#include <string.h>
++
++#define FAT16_MIN_CLUSTERS 4085u
++#define FAT16_MAX_CLUSTERS 65524u
++#define FLAG_MOUNTED 0x01u
++#define FLAG_MBR 0x02u
++#define FLAG_SUPERFLOPPY 0x04u
++#define FLAG_LFN 0x08u
++#define ATTR_VOLUME 0x08u
++#define ATTR_DIRECTORY 0x10u
++#define ATTR_LFN 0x0Fu
++
++static uint16_t le16(const uint8_t *p) {
++    return (uint16_t)p[0] | ((uint16_t)p[1] << 8);
++}
++
++static uint32_t le32(const uint8_t *p) {
++    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
++        ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
++}
++
++static bool power_of_two(uint8_t value) {
++    return value != 0u && (value & (uint8_t)(value - 1u)) == 0u;
++}
++
++static bool bpb_valid(const uint8_t sector[EMES_FAT16_SECTOR_SIZE]) {
++    return sector[510] == 0x55u && sector[511] == 0xAAu &&
++        le16(&sector[11]) == EMES_FAT16_SECTOR_SIZE &&
++        power_of_two(sector[13]) && sector[16] != 0u &&
++        le16(&sector[17]) != 0u && le16(&sector[22]) != 0u;
++}
++
++static bool fat16_partition(uint8_t type) {
++    return type == 0x04u || type == 0x06u || type == 0x0Eu;
++}
++
++static emes_fat16_result_t read_sector(
++    const emes_fat16_volume_t *volume,
++    uint32_t lba,
++    uint8_t sector[EMES_FAT16_SECTOR_SIZE]
++) {
++    if (volume == NULL || volume->read_sector == NULL) return EMES_FAT16_INVALID;
++    return volume->read_sector(lba, sector, volume->context) ? EMES_FAT16_OK : EMES_FAT16_IO;
++}
++
++static emes_fat16_result_t fat_entry(
++    const emes_fat16_volume_t *volume,
++    uint16_t cluster,
++    uint16_t *next
++) {
++    uint8_t sector[EMES_FAT16_SECTOR_SIZE];
++    const uint32_t offset = (uint32_t)cluster * 2u;
++    const uint32_t lba = volume->fat_lba + offset / EMES_FAT16_SECTOR_SIZE;
++    const uint16_t within = (uint16_t)(offset % EMES_FAT16_SECTOR_SIZE);
++    emes_fat16_result_t result = read_sector(volume, lba, sector);
++    if (result != EMES_FAT16_OK) return result;
++    if (within == EMES_FAT16_SECTOR_SIZE - 1u) {
++        uint8_t second[EMES_FAT16_SECTOR_SIZE];
++        result = read_sector(volume, lba + 1u, second);
++        if (result != EMES_FAT16_OK) return result;
++        *next = (uint16_t)sector[within] | ((uint16_t)second[0] << 8);
++    } else {
++        *next = le16(&sector[within]);
++    }
++    return EMES_FAT16_OK;
++}
++
++static char upper_ascii(char value) {
++    if (value >= 'a' && value <= 'z') return (char)(value - ('a' - 'A'));
++    return value;
++}
++
++static bool is_separator(char value) {
++    return value == '\\' || value == '/';
++}
++
++static bool is_illegal(char value) {
++    static const char illegal[] = "\"/\\[]:;=,+<>|";
++    if ((unsigned char)value < 32u || (unsigned char)value >= 127u) return true;
++    for (size_t i = 0u; illegal[i] != '\0'; ++i) if (value == illegal[i]) return true;
++    return false;
++}
++
++static emes_fat16_result_t compile_field(
++    const char *text,
++    size_t length,
++    uint8_t *output,
++    size_t width
++) {
++    size_t out = 0u;
++    for (size_t i = 0u; i < length; ++i) {
++        char ch = upper_ascii(text[i]);
++        if (ch == '*') {
++            while (out < width) output[out++] = '?';
++            return i + 1u == length ? EMES_FAT16_OK : EMES_FAT16_PATH_NOT_FOUND;
++        }
++        if (out >= width || is_illegal(ch)) return EMES_FAT16_PATH_NOT_FOUND;
++        output[out++] = (uint8_t)ch;
++    }
++    while (out < width) output[out++] = ' ';
++    return EMES_FAT16_OK;
++}
++
++static emes_fat16_result_t compile_pattern(const char *pattern, uint8_t output[11]) {
++    const char *dot = NULL;
++    size_t length = strlen(pattern);
++    if (length == 0u) pattern = "*.*";
++    length = strlen(pattern);
++    for (size_t i = 0u; i < length; ++i) {
++        if (pattern[i] == '.') {
++            if (dot != NULL) return EMES_FAT16_PATH_NOT_FOUND;
++            dot = &pattern[i];
++        }
++    }
++    const size_t base_len = dot == NULL ? length : (size_t)(dot - pattern);
++    emes_fat16_result_t result = compile_field(pattern, base_len, output, 8u);
++    if (result != EMES_FAT16_OK) return result;
++    if (dot != NULL) {
++        return compile_field(dot + 1, length - base_len - 1u, &output[8], 3u);
++    }
++    if (memchr(pattern, '*', length) != NULL) {
++        output[8] = '?'; output[9] = '?'; output[10] = '?';
++    } else {
++        output[8] = ' '; output[9] = ' '; output[10] = ' ';
++    }
++    return EMES_FAT16_OK;
++}
++
++static bool pattern_matches(const uint8_t alias[11], const uint8_t pattern[11]) {
++    for (size_t i = 0u; i < 11u; ++i) {
++        if (pattern[i] != '?' && alias[i] != pattern[i]) return false;
++    }
++    return true;
++}
++
++static emes_fat16_result_t entry_at(
++    const emes_fat16_volume_t *volume,
++    bool root,
++    uint16_t first_cluster,
++    uint32_t index,
++    uint8_t raw[32]
++) {
++    uint8_t sector[EMES_FAT16_SECTOR_SIZE];
++    const uint32_t byte_offset = index * 32u;
++    uint32_t lba;
++    uint16_t within;
++    if (root) {
++        if (index >= volume->root_entries) return EMES_FAT16_NO_MORE;
++        lba = volume->root_lba + byte_offset / EMES_FAT16_SECTOR_SIZE;
++        within = (uint16_t)(byte_offset % EMES_FAT16_SECTOR_SIZE);
++    } else {
++        const uint32_t cluster_bytes = (uint32_t)volume->sectors_per_cluster * EMES_FAT16_SECTOR_SIZE;
++        uint32_t skip = byte_offset / cluster_bytes;
++        uint32_t in_chain = byte_offset % cluster_bytes;
++        uint16_t cluster = first_cluster;
++        for (uint32_t i = 0u; i < skip; ++i) {
++            uint16_t next = 0u;
++            emes_fat16_result_t result = fat_entry(volume, cluster, &next);
++            if (result != EMES_FAT16_OK) return result;
++            if (next >= 0xFFF8u) return EMES_FAT16_NO_MORE;
++            if (next < 2u || next == 0xFFF7u) return EMES_FAT16_INVALID;
++            cluster = next;
++        }
++        if (cluster < 2u || cluster >= volume->cluster_count + 2u) return EMES_FAT16_INVALID;
++        lba = volume->data_lba + (uint32_t)(cluster - 2u) * volume->sectors_per_cluster +
++            in_chain / EMES_FAT16_SECTOR_SIZE;
++        within = (uint16_t)(in_chain % EMES_FAT16_SECTOR_SIZE);
++    }
++    emes_fat16_result_t result = read_sector(volume, lba, sector);
++    if (result != EMES_FAT16_OK) return result;
++    memcpy(raw, &sector[within], 32u);
++    return EMES_FAT16_OK;
++}
++
++static void decode_entry(const uint8_t raw[32], bool lfn, emes_fat16_entry_t *entry) {
++    memset(entry, 0, sizeof(*entry));
++    memcpy(entry->alias_raw, raw, 11u);
++    entry->attributes = raw[11];
++    entry->flags = (uint8_t)((lfn ? 0x01u : 0u) | ((raw[11] & ATTR_DIRECTORY) ? 0x02u : 0u));
++    entry->create_time = le16(&raw[14]);
++    entry->create_date = le16(&raw[16]);
++    entry->write_time = le16(&raw[22]);
++    entry->write_date = le16(&raw[24]);
++    entry->first_cluster = le16(&raw[26]);
++    entry->size = le32(&raw[28]);
++}
++
++static bool is_dot_entry(const uint8_t alias[11]) {
++    return alias[0] == '.' && (alias[1] == ' ' || alias[1] == '.');
++}
++
++static emes_fat16_result_t find_exact(
++    const emes_fat16_volume_t *volume,
++    bool root,
++    uint16_t cluster,
++    const uint8_t wanted[11],
++    emes_fat16_entry_t *entry
++) {
++    emes_fat16_dir_t dir;
++    memset(&dir, 0, sizeof(dir));
++    dir.root = root;
++    dir.first_cluster = cluster;
++    memset(dir.pattern, '?', sizeof(dir.pattern));
++    while (true) {
++        emes_fat16_result_t result = emes_fat16_dir_next(volume, &dir, entry);
++        if (result != EMES_FAT16_OK) return result == EMES_FAT16_NO_MORE ? EMES_FAT16_NOT_FOUND : result;
++        if (memcmp(entry->alias_raw, wanted, 11u) == 0) return EMES_FAT16_OK;
++    }
++}
++
++static emes_fat16_result_t component_alias(const char *text, size_t length, uint8_t alias[11]) {
++    if (length == 0u || length > 12u) return EMES_FAT16_PATH_NOT_FOUND;
++    char temp[13];
++    memcpy(temp, text, length);
++    temp[length] = '\0';
++    if (memchr(temp, '*', length) != NULL || memchr(temp, '?', length) != NULL) return EMES_FAT16_PATH_NOT_FOUND;
++    return compile_pattern(temp, alias);
++}
++
++static emes_fat16_result_t resolve_parent(
++    const emes_fat16_volume_t *volume,
++    const char *path,
++    const char **final_component,
++    bool *root,
++    uint16_t *cluster
++) {
++    const char *cursor = path;
++    if (cursor[0] != '\0' && cursor[1] == ':') {
++        if (upper_ascii(cursor[0]) != (char)('A' + volume->flags * 0u)) {
++            /* Only drive A is mounted by the current protocol 1.x model. */
++            if (upper_ascii(cursor[0]) != 'A') return EMES_FAT16_PATH_NOT_FOUND;
++        }
++        cursor += 2;
++    }
++    while (is_separator(*cursor)) ++cursor;
++    *root = true;
++    *cluster = 0u;
++    const char *component = cursor;
++    while (*cursor != '\0') {
++        while (*cursor != '\0' && !is_separator(*cursor)) ++cursor;
++        const char *next = cursor;
++        while (is_separator(*next)) ++next;
++        if (*next == '\0') {
++            *final_component = component;
++            return EMES_FAT16_OK;
++        }
++        const size_t length = (size_t)(cursor - component);
++        if (length == 1u && component[0] == '.') {
++            component = next;
++            cursor = next;
++            continue;
++        }
++        if (length == 2u && component[0] == '.' && component[1] == '.') return EMES_FAT16_PATH_NOT_FOUND;
++        uint8_t alias[11];
++        emes_fat16_result_t result = component_alias(component, length, alias);
++        if (result != EMES_FAT16_OK) return result;
++        emes_fat16_entry_t entry;
++        result = find_exact(volume, *root, *cluster, alias, &entry);
++        if (result != EMES_FAT16_OK || (entry.attributes & ATTR_DIRECTORY) == 0u) return EMES_FAT16_PATH_NOT_FOUND;
++        *root = false;
++        *cluster = entry.first_cluster;
++        component = next;
++        cursor = next;
++    }
++    *final_component = cursor;
++    return EMES_FAT16_OK;
++}
++
++emes_fat16_result_t emes_fat16_mount(
++    emes_fat16_volume_t *volume,
++    emes_fat16_sector_reader_t reader,
++    void *context
++) {
++    uint8_t sector[EMES_FAT16_SECTOR_SIZE];
++    uint32_t partition_lba = 0u;
++    uint8_t layout = FLAG_SUPERFLOPPY;
++    if (volume == NULL || reader == NULL) return EMES_FAT16_INVALID;
++    memset(volume, 0, sizeof(*volume));
++    volume->read_sector = reader;
++    volume->context = context;
++    if (!reader(0u, sector, context)) return EMES_FAT16_IO;
++    if (!bpb_valid(sector)) {
++        bool found = false;
++        if (sector[510] != 0x55u || sector[511] != 0xAAu) return EMES_FAT16_INVALID;
++        for (uint8_t i = 0u; i < 4u; ++i) {
++            const uint16_t off = (uint16_t)(446u + (uint16_t)i * 16u);
++            const uint8_t type = sector[off + 4u];
++            const uint32_t start = le32(&sector[off + 8u]);
++            const uint32_t count = le32(&sector[off + 12u]);
++            if (!fat16_partition(type) || count == 0u) continue;
++            if (!reader(start, sector, context)) return EMES_FAT16_IO;
++            if (bpb_valid(sector)) {
++                partition_lba = start;
++                layout = FLAG_MBR;
++                found = true;
++                break;
++            }
++        }
++        if (!found) return EMES_FAT16_INVALID;
++    }
++    volume->partition_lba = partition_lba;
++    volume->bytes_per_sector = le16(&sector[11]);
++    volume->sectors_per_cluster = sector[13];
++    volume->reserved_sectors = le16(&sector[14]);
++    volume->fat_count = sector[16];
++    volume->root_entries = le16(&sector[17]);
++    volume->total_sectors = le16(&sector[19]);
++    if (volume->total_sectors == 0u) volume->total_sectors = le32(&sector[32]);
++    volume->sectors_per_fat = le16(&sector[22]);
++    volume->volume_serial = le32(&sector[39]);
++    memcpy(volume->volume_label, &sector[43], 11u);
++    volume->volume_label[11] = '\0';
++    if (volume->bytes_per_sector != EMES_FAT16_SECTOR_SIZE ||
++        !power_of_two(volume->sectors_per_cluster) || volume->reserved_sectors == 0u ||
++        volume->fat_count == 0u || volume->root_entries == 0u ||
++        volume->sectors_per_fat == 0u || volume->total_sectors == 0u) return EMES_FAT16_INVALID;
++    volume->root_dir_sectors = (uint16_t)((((uint32_t)volume->root_entries * 32u) + 511u) / 512u);
++    const uint32_t first_data = (uint32_t)volume->reserved_sectors +
++        (uint32_t)volume->fat_count * volume->sectors_per_fat + volume->root_dir_sectors;
++    if (first_data >= volume->total_sectors) return EMES_FAT16_INVALID;
++    volume->cluster_count = (volume->total_sectors - first_data) / volume->sectors_per_cluster;
++    if (volume->cluster_count < FAT16_MIN_CLUSTERS || volume->cluster_count > FAT16_MAX_CLUSTERS) return EMES_FAT16_INVALID;
++    volume->fat_lba = partition_lba + volume->reserved_sectors;
++    volume->root_lba = volume->fat_lba + (uint32_t)volume->fat_count * volume->sectors_per_fat;
++    volume->data_lba = volume->root_lba + volume->root_dir_sectors;
++    volume->flags = (uint8_t)(FLAG_MOUNTED | layout);
++    emes_fat16_dir_t dir;
++    memset(&dir, 0, sizeof(dir));
++    dir.root = true;
++    memset(dir.pattern, '?', sizeof(dir.pattern));
++    emes_fat16_entry_t entry;
++    while (emes_fat16_dir_next(volume, &dir, &entry) == EMES_FAT16_OK) {
++        if ((entry.flags & 0x01u) != 0u) { volume->flags |= FLAG_LFN; break; }
++    }
++    return EMES_FAT16_OK;
++}
++
++emes_fat16_result_t emes_fat16_open_dir(
++    const emes_fat16_volume_t *volume,
++    const char *path_pattern,
++    emes_fat16_dir_t *directory
++) {
++    if (volume == NULL || path_pattern == NULL || directory == NULL) return EMES_FAT16_INVALID;
++    const char *final = NULL;
++    bool root = true;
++    uint16_t cluster = 0u;
++    emes_fat16_result_t result = resolve_parent(volume, path_pattern, &final, &root, &cluster);
++    if (result != EMES_FAT16_OK) return result;
++    memset(directory, 0, sizeof(*directory));
++    directory->root = root;
++    directory->first_cluster = cluster;
++    return compile_pattern(*final == '\0' ? "*.*" : final, directory->pattern);
++}
++
++emes_fat16_result_t emes_fat16_dir_next(
++    const emes_fat16_volume_t *volume,
++    emes_fat16_dir_t *directory,
++    emes_fat16_entry_t *entry
++) {
++    uint8_t raw[32];
++    if (volume == NULL || directory == NULL || entry == NULL) return EMES_FAT16_INVALID;
++    while (true) {
++        emes_fat16_result_t result = entry_at(
++            volume, directory->root, directory->first_cluster, directory->next_index++, raw
++        );
++        if (result != EMES_FAT16_OK) return result;
++        if (raw[0] == 0x00u) return EMES_FAT16_NO_MORE;
++        if (raw[0] == 0xE5u) { directory->pending_lfn = false; continue; }
++        if (raw[11] == ATTR_LFN) { directory->pending_lfn = true; continue; }
++        const bool lfn = directory->pending_lfn;
++        directory->pending_lfn = false;
++        if ((raw[11] & ATTR_VOLUME) != 0u || is_dot_entry(raw)) continue;
++        if (!pattern_matches(raw, directory->pattern)) continue;
++        decode_entry(raw, lfn, entry);
++        return EMES_FAT16_OK;
++    }
++}
++
++emes_fat16_result_t emes_fat16_open_path(
++    const emes_fat16_volume_t *volume,
++    const char *path,
++    emes_fat16_file_t *file
++) {
++    if (volume == NULL || path == NULL || file == NULL) return EMES_FAT16_INVALID;
++    const char *final = NULL;
++    bool root = true;
++    uint16_t cluster = 0u;
++    emes_fat16_result_t result = resolve_parent(volume, path, &final, &root, &cluster);
++    if (result != EMES_FAT16_OK || *final == '\0') return EMES_FAT16_PATH_NOT_FOUND;
++    const char *end = final;
++    while (*end != '\0' && !is_separator(*end)) ++end;
++    uint8_t alias[11];
++    result = component_alias(final, (size_t)(end - final), alias);
++    if (result != EMES_FAT16_OK) return result;
++    result = find_exact(volume, root, cluster, alias, &file->entry);
++    if (result != EMES_FAT16_OK) return result;
++    if ((file->entry.attributes & ATTR_DIRECTORY) != 0u) return EMES_FAT16_PATH_NOT_FOUND;
++    file->position = 0u;
++    return EMES_FAT16_OK;
++}
++
++emes_fat16_result_t emes_fat16_read(
++    const emes_fat16_volume_t *volume,
++    emes_fat16_file_t *file,
++    uint8_t *destination,
++    uint16_t requested,
++    uint16_t *actual
++) {
++    uint8_t sector[EMES_FAT16_SECTOR_SIZE];
++    if (volume == NULL || file == NULL || destination == NULL || actual == NULL) return EMES_FAT16_INVALID;
++    *actual = 0u;
++    if (file->position >= file->entry.size || requested == 0u) return EMES_FAT16_OK;
++    uint32_t remaining = file->entry.size - file->position;
++    if (remaining > requested) remaining = requested;
++    const uint32_t cluster_bytes = (uint32_t)volume->sectors_per_cluster * EMES_FAT16_SECTOR_SIZE;
++    uint32_t cluster_index = file->position / cluster_bytes;
++    uint32_t in_cluster = file->position % cluster_bytes;
++    uint16_t cluster = file->entry.first_cluster;
++    for (uint32_t i = 0u; i < cluster_index; ++i) {
++        uint16_t next = 0u;
++        emes_fat16_result_t result = fat_entry(volume, cluster, &next);
++        if (result != EMES_FAT16_OK) return result;
++        if (next < 2u || next >= 0xFFF8u) return EMES_FAT16_INVALID;
++        cluster = next;
++    }
++    while (remaining > 0u) {
++        if (cluster < 2u || cluster >= volume->cluster_count + 2u) return EMES_FAT16_INVALID;
++        const uint32_t sector_index = in_cluster / EMES_FAT16_SECTOR_SIZE;
++        const uint16_t within = (uint16_t)(in_cluster % EMES_FAT16_SECTOR_SIZE);
++        const uint32_t lba = volume->data_lba + (uint32_t)(cluster - 2u) * volume->sectors_per_cluster + sector_index;
++        emes_fat16_result_t result = read_sector(volume, lba, sector);
++        if (result != EMES_FAT16_OK) return result;
++        uint32_t take = EMES_FAT16_SECTOR_SIZE - within;
++        if (take > remaining) take = remaining;
++        memcpy(&destination[*actual], &sector[within], take);
++        *actual = (uint16_t)(*actual + take);
++        file->position += take;
++        remaining -= take;
++        in_cluster += take;
++        if (remaining > 0u && in_cluster >= cluster_bytes) {
++            uint16_t next = 0u;
++            result = fat_entry(volume, cluster, &next);
++            if (result != EMES_FAT16_OK) return result;
++            if (next < 2u || next >= 0xFFF8u) return EMES_FAT16_INVALID;
++            cluster = next;
++            in_cluster = 0u;
++        }
++    }
++    return EMES_FAT16_OK;
++}
++
++emes_fat16_result_t emes_fat16_seek(emes_fat16_file_t *file, uint32_t offset, uint8_t whence) {
++    if (file == NULL) return EMES_FAT16_INVALID;
++    uint32_t target;
++    if (whence == 0u) target = offset;
++    else if (whence == 1u) {
++        if (UINT32_MAX - file->position < offset) return EMES_FAT16_SEEK;
++        target = file->position + offset;
++    } else if (whence == 2u) {
++        if (UINT32_MAX - file->entry.size < offset) return EMES_FAT16_SEEK;
++        target = file->entry.size + offset;
++    } else return EMES_FAT16_SEEK;
++    if (target > file->entry.size) return EMES_FAT16_SEEK;
++    file->position = target;
++    return EMES_FAT16_OK;
++}
++
++emes_fat16_result_t emes_fat16_free_space(const emes_fat16_volume_t *volume, emes_fat16_free_t *info) {
++    if (volume == NULL || info == NULL) return EMES_FAT16_INVALID;
++    uint32_t free_count = 0u;
++    for (uint32_t cluster = 2u; cluster < volume->cluster_count + 2u; ++cluster) {
++        uint16_t value = 0u;
++        emes_fat16_result_t result = fat_entry(volume, (uint16_t)cluster, &value);
++        if (result != EMES_FAT16_OK) return result;
++        if (value == 0u) ++free_count;
++    }
++    info->bytes_per_sector = volume->bytes_per_sector;
++    info->sectors_per_cluster = volume->sectors_per_cluster;
++    info->free_clusters = (uint16_t)free_count;
++    info->total_clusters = (uint16_t)volume->cluster_count;
++    info->total_sectors = volume->total_sectors;
++    return EMES_FAT16_OK;
++}
++
++emes_fat16_result_t emes_fat16_root_next(
++    const emes_fat16_volume_t *volume,
++    emes_fat16_dir_t *directory,
++    emes_fat16_entry_t *entry
++) {
++    if (directory != NULL && directory->next_index == 0u) {
++        directory->root = true;
++        memset(directory->pattern, '?', sizeof(directory->pattern));
++    }
++    return emes_fat16_dir_next(volume, directory, entry);
++}
++
++emes_fat16_result_t emes_fat16_open_root(
++    const emes_fat16_volume_t *volume,
++    const char *path,
++    emes_fat16_file_t *file
++) {
++    return emes_fat16_open_path(volume, path, file);
++}
+diff --git a/src/emesdos09/fat16_ro.h b/src/emesdos09/fat16_ro.h
+new file mode 100644
+index 00000000..d8f91def
+--- /dev/null
++++ b/src/emesdos09/fat16_ro.h
+@@ -0,0 +1,126 @@
++#ifndef EMESDOS09_FAT16_RO_H
++#define EMESDOS09_FAT16_RO_H
++
++#include <stdbool.h>
++#include <stddef.h>
++#include <stdint.h>
++
++#define EMES_FAT16_SECTOR_SIZE 512u
++#define EMES_FAT16_MAX_PATH 80u
++
++typedef bool (*emes_fat16_sector_reader_t)(uint32_t lba, uint8_t *sector, void *context);
++
++typedef enum {
++    EMES_FAT16_OK = 0,
++    EMES_FAT16_IO,
++    EMES_FAT16_INVALID,
++    EMES_FAT16_NOT_FOUND,
++    EMES_FAT16_PATH_NOT_FOUND,
++    EMES_FAT16_NO_MORE,
++    EMES_FAT16_SEEK
++} emes_fat16_result_t;
++
++typedef struct {
++    emes_fat16_sector_reader_t read_sector;
++    void *context;
++    uint32_t partition_lba;
++    uint32_t fat_lba;
++    uint32_t root_lba;
++    uint32_t data_lba;
++    uint32_t total_sectors;
++    uint32_t cluster_count;
++    uint16_t reserved_sectors;
++    uint16_t root_entries;
++    uint16_t root_dir_sectors;
++    uint16_t sectors_per_fat;
++    uint16_t bytes_per_sector;
++    uint8_t sectors_per_cluster;
++    uint8_t fat_count;
++    uint8_t flags;
++    uint32_t volume_serial;
++    char volume_label[12];
++} emes_fat16_volume_t;
++
++typedef struct {
++    uint8_t alias_raw[11];
++    uint8_t attributes;
++    uint8_t flags;
++    uint16_t create_time;
++    uint16_t create_date;
++    uint16_t write_time;
++    uint16_t write_date;
++    uint16_t first_cluster;
++    uint32_t size;
++} emes_fat16_entry_t;
++
++typedef struct {
++    uint16_t first_cluster;
++    uint32_t next_index;
++    bool root;
++    bool pending_lfn;
++    uint8_t pattern[11];
++} emes_fat16_dir_t;
++
++typedef struct {
++    emes_fat16_entry_t entry;
++    uint32_t position;
++} emes_fat16_file_t;
++
++typedef struct {
++    uint16_t bytes_per_sector;
++    uint16_t free_clusters;
++    uint16_t total_clusters;
++    uint8_t sectors_per_cluster;
++    uint32_t total_sectors;
++} emes_fat16_free_t;
++
++emes_fat16_result_t emes_fat16_mount(
++    emes_fat16_volume_t *volume,
++    emes_fat16_sector_reader_t reader,
++    void *context
++);
++emes_fat16_result_t emes_fat16_open_dir(
++    const emes_fat16_volume_t *volume,
++    const char *path_pattern,
++    emes_fat16_dir_t *directory
++);
++emes_fat16_result_t emes_fat16_dir_next(
++    const emes_fat16_volume_t *volume,
++    emes_fat16_dir_t *directory,
++    emes_fat16_entry_t *entry
++);
++emes_fat16_result_t emes_fat16_open_path(
++    const emes_fat16_volume_t *volume,
++    const char *path,
++    emes_fat16_file_t *file
++);
++emes_fat16_result_t emes_fat16_read(
++    const emes_fat16_volume_t *volume,
++    emes_fat16_file_t *file,
++    uint8_t *destination,
++    uint16_t requested,
++    uint16_t *actual
++);
++emes_fat16_result_t emes_fat16_seek(
++    emes_fat16_file_t *file,
++    uint32_t offset,
++    uint8_t whence
++);
++emes_fat16_result_t emes_fat16_free_space(
++    const emes_fat16_volume_t *volume,
++    emes_fat16_free_t *info
++);
++
++/* Sprint-6 compatibility wrappers. */
++emes_fat16_result_t emes_fat16_root_next(
++    const emes_fat16_volume_t *volume,
++    emes_fat16_dir_t *directory,
++    emes_fat16_entry_t *entry
++);
++emes_fat16_result_t emes_fat16_open_root(
++    const emes_fat16_volume_t *volume,
++    const char *path,
++    emes_fat16_file_t *file
++);
++
++#endif
+diff --git a/src/emesdos09/fat16_rw.c b/src/emesdos09/fat16_rw.c
+new file mode 100644
+index 00000000..78d42540
+--- /dev/null
++++ b/src/emesdos09/fat16_rw.c
+@@ -0,0 +1,280 @@
++#include "fat16_rw.h"
++
++#include <string.h>
++
++static uint16_t le16(const uint8_t *data) {
++    return (uint16_t)data[0] | ((uint16_t)data[1] << 8);
++}
++
++static void put_le16(uint8_t *data, uint16_t value) {
++    data[0] = (uint8_t)value;
++    data[1] = (uint8_t)(value >> 8);
++}
++
++static void put_le32(uint8_t *data, uint32_t value) {
++    data[0] = (uint8_t)value;
++    data[1] = (uint8_t)(value >> 8);
++    data[2] = (uint8_t)(value >> 16);
++    data[3] = (uint8_t)(value >> 24);
++}
++
++static bool boundary(
++    emes_fat16_commit_boundary_t value,
++    emes_fat16_boundary_hook_t hook,
++    void *context,
++    emes_fat16_commit_result_t *result
++) {
++    result->last_boundary = value;
++    return hook == NULL || hook(value, context);
++}
++
++static emes_fat16_rw_result_t read_fat_entry(
++    const emes_fat16_volume_t *volume,
++    uint16_t cluster,
++    uint16_t *value
++) {
++    uint8_t sector[EMES_FAT16_SECTOR_SIZE];
++    const uint32_t byte_offset = (uint32_t)cluster * 2u;
++    const uint32_t lba = volume->fat_lba + byte_offset / EMES_FAT16_SECTOR_SIZE;
++    const uint16_t offset = (uint16_t)(byte_offset % EMES_FAT16_SECTOR_SIZE);
++    if (!volume->read_sector(lba, sector, volume->context)) return EMES_FAT16_RW_IO;
++    *value = le16(&sector[offset]);
++    return EMES_FAT16_RW_OK;
++}
++
++static emes_fat16_rw_result_t write_fat_entry(
++    const emes_fat16_volume_t *volume,
++    emes_fat16_sector_writer_t writer,
++    void *context,
++    uint8_t fat_copy,
++    uint16_t cluster,
++    uint16_t value
++) {
++    uint8_t sector[EMES_FAT16_SECTOR_SIZE];
++    const uint32_t byte_offset = (uint32_t)cluster * 2u;
++    const uint32_t lba = volume->fat_lba
++        + (uint32_t)fat_copy * volume->sectors_per_fat
++        + byte_offset / EMES_FAT16_SECTOR_SIZE;
++    const uint16_t offset = (uint16_t)(byte_offset % EMES_FAT16_SECTOR_SIZE);
++    if (!volume->read_sector(lba, sector, volume->context)) return EMES_FAT16_RW_IO;
++    put_le16(&sector[offset], value);
++    return writer(lba, sector, context) ? EMES_FAT16_RW_OK : EMES_FAT16_RW_IO;
++}
++
++static emes_fat16_rw_result_t allocate_clusters(
++    const emes_fat16_volume_t *volume,
++    uint16_t needed,
++    uint16_t *clusters
++) {
++    uint16_t found = 0u;
++    for (uint32_t cluster = 2u; cluster < volume->cluster_count + 2u && found < needed; ++cluster) {
++        uint16_t value = 0u;
++        emes_fat16_rw_result_t status = read_fat_entry(volume, (uint16_t)cluster, &value);
++        if (status != EMES_FAT16_RW_OK) return status;
++        if (value == 0u) clusters[found++] = (uint16_t)cluster;
++    }
++    return found == needed ? EMES_FAT16_RW_OK : EMES_FAT16_RW_NO_SPACE;
++}
++
++static emes_fat16_rw_result_t write_data_clusters(
++    const emes_fat16_volume_t *volume,
++    emes_fat16_sector_writer_t writer,
++    void *context,
++    const uint16_t *clusters,
++    uint16_t cluster_count,
++    const uint8_t *data,
++    uint32_t size,
++    emes_fat16_commit_result_t *result
++) {
++    uint8_t sector[EMES_FAT16_SECTOR_SIZE];
++    uint32_t position = 0u;
++    for (uint16_t index = 0u; index < cluster_count; ++index) {
++        const uint32_t first_lba = volume->data_lba
++            + ((uint32_t)clusters[index] - 2u) * volume->sectors_per_cluster;
++        for (uint8_t sector_index = 0u; sector_index < volume->sectors_per_cluster; ++sector_index) {
++            memset(sector, 0, sizeof(sector));
++            uint16_t copy = 0u;
++            if (position < size) {
++                const uint32_t remaining = size - position;
++                copy = remaining < sizeof(sector) ? (uint16_t)remaining : (uint16_t)sizeof(sector);
++                if (copy != 0u && data != NULL) memcpy(sector, &data[position], copy);
++                position += copy;
++            }
++            if (!writer(first_lba + sector_index, sector, context)) return EMES_FAT16_RW_IO;
++        }
++        ++result->data_cluster_writes;
++    }
++    return EMES_FAT16_RW_OK;
++}
++
++static emes_fat16_rw_result_t publish_new_chain(
++    const emes_fat16_volume_t *volume,
++    emes_fat16_sector_writer_t writer,
++    void *context,
++    const uint16_t *clusters,
++    uint16_t cluster_count,
++    uint8_t fat_copy,
++    emes_fat16_commit_result_t *result
++) {
++    for (uint16_t index = 0u; index < cluster_count; ++index) {
++        const uint16_t next = (index + 1u < cluster_count) ? clusters[index + 1u] : 0xFFFFu;
++        emes_fat16_rw_result_t status = write_fat_entry(
++            volume, writer, context, fat_copy, clusters[index], next
++        );
++        if (status != EMES_FAT16_RW_OK) return status;
++        ++result->fat_entry_writes;
++    }
++    return EMES_FAT16_RW_OK;
++}
++
++static emes_fat16_rw_result_t publish_directory(
++    const emes_fat16_volume_t *volume,
++    emes_fat16_sector_writer_t writer,
++    void *context,
++    const emes_fat16_commit_request_t *request,
++    uint16_t first_cluster,
++    emes_fat16_commit_result_t *result
++) {
++    uint8_t sector[EMES_FAT16_SECTOR_SIZE];
++    if (request->directory_offset > EMES_FAT16_SECTOR_SIZE - 32u ||
++        (request->directory_offset & 31u) != 0u) return EMES_FAT16_RW_INVALID;
++    if (!volume->read_sector(request->directory_lba, sector, volume->context)) {
++        return EMES_FAT16_RW_IO;
++    }
++    uint8_t *record = &sector[request->directory_offset];
++    memset(record, 0, 32u);
++    memcpy(record, request->alias_raw, 11u);
++    record[11] = (uint8_t)(request->attributes & 0x3Fu);
++    put_le16(&record[14], request->create_time);
++    put_le16(&record[16], request->create_date);
++    /* Deterministic Sprint 9 write timestamp: 2026-07-28 12:00:00. */
++    put_le16(&record[18], (uint16_t)(((2026u - 1980u) << 9) | (7u << 5) | 28u));
++    put_le16(&record[22], (uint16_t)(12u << 11));
++    put_le16(&record[24], (uint16_t)(((2026u - 1980u) << 9) | (7u << 5) | 28u));
++    put_le16(&record[26], first_cluster);
++    put_le32(&record[28], request->size);
++    if (!writer(request->directory_lba, sector, context)) return EMES_FAT16_RW_IO;
++    ++result->directory_entry_writes;
++    return EMES_FAT16_RW_OK;
++}
++
++static emes_fat16_rw_result_t release_old_chain(
++    const emes_fat16_volume_t *volume,
++    emes_fat16_sector_writer_t writer,
++    void *context,
++    uint16_t first_cluster,
++    emes_fat16_commit_result_t *result
++) {
++    uint16_t cluster = first_cluster;
++    uint32_t guard = 0u;
++    while (cluster >= 2u && cluster < 0xFFF8u && guard++ <= volume->cluster_count) {
++        uint16_t next = 0u;
++        emes_fat16_rw_result_t status = read_fat_entry(volume, cluster, &next);
++        if (status != EMES_FAT16_RW_OK) return status;
++        for (uint8_t copy = 0u; copy < volume->fat_count; ++copy) {
++            status = write_fat_entry(volume, writer, context, copy, cluster, 0u);
++            if (status != EMES_FAT16_RW_OK) return status;
++            ++result->fat_entry_writes;
++        }
++        ++result->released_clusters;
++        cluster = next;
++    }
++    return guard > volume->cluster_count + 1u ? EMES_FAT16_RW_INVALID : EMES_FAT16_RW_OK;
++}
++
++static emes_fat16_rw_result_t verify_data(
++    const emes_fat16_volume_t *volume,
++    const uint16_t *clusters,
++    uint16_t cluster_count,
++    const uint8_t *data,
++    uint32_t size
++) {
++    uint8_t sector[EMES_FAT16_SECTOR_SIZE];
++    uint32_t position = 0u;
++    for (uint16_t index = 0u; index < cluster_count; ++index) {
++        const uint32_t first_lba = volume->data_lba
++            + ((uint32_t)clusters[index] - 2u) * volume->sectors_per_cluster;
++        for (uint8_t sector_index = 0u; sector_index < volume->sectors_per_cluster && position < size; ++sector_index) {
++            if (!volume->read_sector(first_lba + sector_index, sector, volume->context)) {
++                return EMES_FAT16_RW_IO;
++            }
++            const uint32_t remaining = size - position;
++            const uint16_t compare = remaining < sizeof(sector) ? (uint16_t)remaining : (uint16_t)sizeof(sector);
++            if (compare != 0u && data != NULL && memcmp(sector, &data[position], compare) != 0) {
++                return EMES_FAT16_RW_VERIFY_FAILED;
++            }
++            position += compare;
++        }
++    }
++    return EMES_FAT16_RW_OK;
++}
++
++emes_fat16_rw_result_t emes_fat16_rw_commit(
++    const emes_fat16_volume_t *volume,
++    emes_fat16_sector_writer_t writer,
++    void *io_context,
++    const emes_fat16_commit_request_t *request,
++    emes_fat16_boundary_hook_t boundary_hook,
++    void *boundary_context,
++    emes_fat16_commit_result_t *result
++) {
++    if (volume == NULL || writer == NULL || request == NULL || result == NULL ||
++        volume->bytes_per_sector != EMES_FAT16_SECTOR_SIZE || volume->fat_count == 0u) {
++        return EMES_FAT16_RW_INVALID;
++    }
++    if (request->write_protect) return EMES_FAT16_RW_WRITE_PROTECT;
++    memset(result, 0, sizeof(*result));
++
++    const uint32_t cluster_bytes = (uint32_t)volume->sectors_per_cluster * EMES_FAT16_SECTOR_SIZE;
++    const uint32_t needed32 = request->size == 0u ? 0u : (request->size + cluster_bytes - 1u) / cluster_bytes;
++    if (needed32 > EMES_FAT16_RW_MAX_CLUSTERS) return EMES_FAT16_RW_NO_SPACE;
++    const uint16_t needed = (uint16_t)needed32;
++    uint16_t clusters[EMES_FAT16_RW_MAX_CLUSTERS];
++    memset(clusters, 0, sizeof(clusters));
++
++    emes_fat16_rw_result_t status = allocate_clusters(volume, needed, clusters);
++    if (status != EMES_FAT16_RW_OK) return status;
++    result->allocated_clusters = needed;
++    result->first_cluster = needed == 0u ? 0u : clusters[0];
++
++    status = write_data_clusters(
++        volume, writer, io_context, clusters, needed, request->data, request->size, result
++    );
++    if (status != EMES_FAT16_RW_OK) return status;
++    if (!boundary(EMES_FAT16_COMMIT_AFTER_DATA, boundary_hook, boundary_context, result)) {
++        return EMES_FAT16_RW_POWER_LOSS;
++    }
++
++    for (uint8_t copy = 0u; copy < volume->fat_count; ++copy) {
++        status = publish_new_chain(volume, writer, io_context, clusters, needed, copy, result);
++        if (status != EMES_FAT16_RW_OK) return status;
++        const emes_fat16_commit_boundary_t phase = copy == 0u
++            ? EMES_FAT16_COMMIT_AFTER_FAT_COPY_0
++            : EMES_FAT16_COMMIT_AFTER_FAT_COPY_1;
++        if (!boundary(phase, boundary_hook, boundary_context, result)) {
++            return EMES_FAT16_RW_POWER_LOSS;
++        }
++    }
++
++    status = publish_directory(volume, writer, io_context, request, result->first_cluster, result);
++    if (status != EMES_FAT16_RW_OK) return status;
++    if (!boundary(EMES_FAT16_COMMIT_AFTER_DIRECTORY, boundary_hook, boundary_context, result)) {
++        return EMES_FAT16_RW_POWER_LOSS;
++    }
++
++    status = release_old_chain(volume, writer, io_context, request->old_first_cluster, result);
++    if (status != EMES_FAT16_RW_OK) return status;
++    if (!boundary(EMES_FAT16_COMMIT_AFTER_CLEANUP, boundary_hook, boundary_context, result)) {
++        return EMES_FAT16_RW_POWER_LOSS;
++    }
++
++    if (request->verify) {
++        status = verify_data(volume, clusters, needed, request->data, request->size);
++        if (status != EMES_FAT16_RW_OK) return status;
++        ++result->verify_passes;
++    }
++    if (!boundary(EMES_FAT16_COMMIT_AFTER_VERIFY, boundary_hook, boundary_context, result)) {
++        return EMES_FAT16_RW_POWER_LOSS;
++    }
++    return EMES_FAT16_RW_OK;
++}
+diff --git a/src/emesdos09/fat16_rw.h b/src/emesdos09/fat16_rw.h
+new file mode 100644
+index 00000000..23d7f128
+--- /dev/null
++++ b/src/emesdos09/fat16_rw.h
+@@ -0,0 +1,77 @@
++#ifndef EMESDOS09_FAT16_RW_H
++#define EMESDOS09_FAT16_RW_H
++
++#include <stdbool.h>
++#include <stddef.h>
++#include <stdint.h>
++
++#include "fat16_ro.h"
++
++#define EMES_FAT16_RW_MAX_CLUSTERS 256u
++
++typedef bool (*emes_fat16_sector_writer_t)(uint32_t lba, const uint8_t *sector, void *context);
++
++typedef enum {
++    EMES_FAT16_COMMIT_AFTER_DATA = 0,
++    EMES_FAT16_COMMIT_AFTER_FAT_COPY_0,
++    EMES_FAT16_COMMIT_AFTER_FAT_COPY_1,
++    EMES_FAT16_COMMIT_AFTER_DIRECTORY,
++    EMES_FAT16_COMMIT_AFTER_CLEANUP,
++    EMES_FAT16_COMMIT_AFTER_VERIFY
++} emes_fat16_commit_boundary_t;
++
++typedef bool (*emes_fat16_boundary_hook_t)(emes_fat16_commit_boundary_t boundary, void *context);
++
++typedef enum {
++    EMES_FAT16_RW_OK = 0,
++    EMES_FAT16_RW_IO,
++    EMES_FAT16_RW_INVALID,
++    EMES_FAT16_RW_NO_SPACE,
++    EMES_FAT16_RW_WRITE_PROTECT,
++    EMES_FAT16_RW_POWER_LOSS,
++    EMES_FAT16_RW_VERIFY_FAILED
++} emes_fat16_rw_result_t;
++
++typedef struct {
++    uint32_t directory_lba;
++    uint16_t directory_offset;
++    uint16_t old_first_cluster;
++    uint8_t alias_raw[11];
++    uint8_t attributes;
++    uint16_t create_time;
++    uint16_t create_date;
++    const uint8_t *data;
++    uint32_t size;
++    bool verify;
++    bool write_protect;
++} emes_fat16_commit_request_t;
++
++typedef struct {
++    uint16_t first_cluster;
++    uint16_t allocated_clusters;
++    uint16_t released_clusters;
++    uint16_t data_cluster_writes;
++    uint16_t fat_entry_writes;
++    uint16_t directory_entry_writes;
++    uint16_t verify_passes;
++    emes_fat16_commit_boundary_t last_boundary;
++} emes_fat16_commit_result_t;
++
++/*
++ * Commit a complete replacement file image using metadata-last copy-on-write.
++ * The caller resolves the DOS path and supplies the short-directory-entry
++ * location. The engine allocates fresh clusters, writes all data, publishes
++ * every FAT copy, publishes the directory record, and only then releases the
++ * old chain. Directory growth is a Sprint 10 responsibility.
++ */
++emes_fat16_rw_result_t emes_fat16_rw_commit(
++    const emes_fat16_volume_t *volume,
++    emes_fat16_sector_writer_t writer,
++    void *io_context,
++    const emes_fat16_commit_request_t *request,
++    emes_fat16_boundary_hook_t boundary_hook,
++    void *boundary_context,
++    emes_fat16_commit_result_t *result
++);
++
++#endif
+diff --git a/src/emesdos09/ide_image.c b/src/emesdos09/ide_image.c
+new file mode 100644
+index 00000000..6fb25fd2
+--- /dev/null
++++ b/src/emesdos09/ide_image.c
+@@ -0,0 +1,70 @@
++#include "ide_image.h"
++#include <string.h>
++
++static void put_le16(uint8_t *p, uint16_t value) {
++    p[0] = (uint8_t)value;
++    p[1] = (uint8_t)(value >> 8);
++}
++
++static void ata_string(uint8_t *out, uint16_t word, uint16_t words, const char *text) {
++    size_t length = strlen(text);
++    size_t limit = (size_t)words * 2u;
++    for (size_t i = 0u; i < limit; i += 2u) {
++        uint8_t first = i < length ? (uint8_t)text[i] : (uint8_t)' ';
++        uint8_t second = i + 1u < length ? (uint8_t)text[i + 1u] : (uint8_t)' ';
++        out[word * 2u + i] = second;
++        out[word * 2u + i + 1u] = first;
++    }
++}
++
++bool emes_ide_attach(emes_ide_image_t *ide, uint8_t unit, uint32_t byte_size, bool read_only) {
++    if (ide == NULL || unit > 1u || byte_size < 64u * 512u || (byte_size % 512u) != 0u)
++        return false;
++    memset(ide, 0, sizeof(*ide));
++    ide->unit = unit;
++    ide->attached = true;
++    ide->read_only = read_only;
++    ide->sectors = byte_size / 512u;
++    ide->heads = 16u;
++    ide->sectors_per_track = 63u;
++    uint32_t cylinders = (ide->sectors + 1007u) / 1008u;
++    if (cylinders == 0u) cylinders = 1u;
++    if (cylinders > 16383u) cylinders = 16383u;
++    ide->cylinders = (uint16_t)cylinders;
++    return true;
++}
++
++bool emes_ide_read_half(const emes_ide_image_t *ide, uint32_t lba, uint8_t half,
++                        uint8_t out[256], emes_ide_reader_t reader, void *context) {
++    if (ide == NULL || !ide->attached || lba >= ide->sectors || half > 1u ||
++        out == NULL || reader == NULL)
++        return false;
++    return reader(lba * 512u + (uint32_t)half * 256u, out, 256u, context);
++}
++
++bool emes_ide_write_half(emes_ide_image_t *ide, uint32_t lba, uint8_t half,
++                         const uint8_t data[256], emes_ide_writer_t writer, void *context) {
++    if (ide == NULL || !ide->attached || ide->read_only || lba >= ide->sectors ||
++        half > 1u || data == NULL || writer == NULL)
++        return false;
++    if (!writer(lba * 512u + (uint32_t)half * 256u, data, 256u, context))
++        return false;
++    ide->dirty = true;
++    return true;
++}
++
++void emes_ide_identify(const emes_ide_image_t *ide, uint8_t out[512]) {
++    memset(out, 0, 512u);
++    if (ide == NULL || !ide->attached) return;
++    put_le16(out + 0, 0x0040u);
++    put_le16(out + 2, ide->cylinders);
++    put_le16(out + 6, ide->heads);
++    put_le16(out + 12, ide->sectors_per_track);
++    put_le16(out + 98, 0x0200u);
++    put_le16(out + 120, (uint16_t)ide->sectors);
++    put_le16(out + 122, (uint16_t)(ide->sectors >> 16));
++    put_le16(out + 164, 0x0020u);
++    put_le16(out + 170, 0x0020u);
++    ata_string(out, 23u, 4u, "0.16.0");
++    ata_string(out, 27u, 20u, ide->unit ? "emesDOS09 VIRTUAL IDE1" : "emesDOS09 VIRTUAL IDE0");
++}
+diff --git a/src/emesdos09/ide_image.h b/src/emesdos09/ide_image.h
+new file mode 100644
+index 00000000..78daad7c
+--- /dev/null
++++ b/src/emesdos09/ide_image.h
+@@ -0,0 +1,28 @@
++#ifndef EMESDOS09_IDE_IMAGE_H
++#define EMESDOS09_IDE_IMAGE_H
++#include <stdbool.h>
++#include <stddef.h>
++#include <stdint.h>
++#define EMES_IDE_SECTOR_SIZE 512u
++#define EMES_IDE_HALF_SIZE 256u
++#define EMES_IDE_MAX_EXTENTS 64u
++typedef struct { uint32_t first_lba; uint32_t sectors; } emes_ide_extent_t;
++typedef struct {
++    uint8_t unit;
++    bool attached;
++    bool read_only;
++    bool dirty;
++    uint32_t sectors;
++    uint16_t cylinders;
++    uint8_t heads;
++    uint8_t sectors_per_track;
++    uint16_t extent_count;
++    emes_ide_extent_t extents[EMES_IDE_MAX_EXTENTS];
++} emes_ide_image_t;
++typedef bool (*emes_ide_reader_t)(uint32_t offset, uint8_t *data, uint16_t length, void *context);
++typedef bool (*emes_ide_writer_t)(uint32_t offset, const uint8_t *data, uint16_t length, void *context);
++bool emes_ide_attach(emes_ide_image_t *ide, uint8_t unit, uint32_t byte_size, bool read_only);
++bool emes_ide_read_half(const emes_ide_image_t *ide, uint32_t lba, uint8_t half, uint8_t out[EMES_IDE_HALF_SIZE], emes_ide_reader_t reader, void *context);
++bool emes_ide_write_half(emes_ide_image_t *ide, uint32_t lba, uint8_t half, const uint8_t data[EMES_IDE_HALF_SIZE], emes_ide_writer_t writer, void *context);
++void emes_ide_identify(const emes_ide_image_t *ide, uint8_t out[EMES_IDE_SECTOR_SIZE]);
++#endif
+diff --git a/src/emesdos09/partition_fat.c b/src/emesdos09/partition_fat.c
+new file mode 100644
+index 00000000..d6d3e7ad
+--- /dev/null
++++ b/src/emesdos09/partition_fat.c
+@@ -0,0 +1,82 @@
++#include "partition_fat.h"
++#include <string.h>
++
++static uint16_t le16(const uint8_t *p) { return (uint16_t)p[0] | (uint16_t)((uint16_t)p[1] << 8); }
++static uint32_t le32(const uint8_t *p) { return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24); }
++static void put16(uint8_t *p, uint16_t v) { p[0]=(uint8_t)v; p[1]=(uint8_t)(v>>8); }
++static void put32(uint8_t *p, uint32_t v) { p[0]=(uint8_t)v; p[1]=(uint8_t)(v>>8); p[2]=(uint8_t)(v>>16); p[3]=(uint8_t)(v>>24); }
++static bool supported_type(uint8_t type) {
++    return type==0x01u || type==0x04u || type==0x06u || type==0x0Eu || type==0x0Bu || type==0x0Cu;
++}
++
++bool emes_mbr_enumerate(const uint8_t sector[512], uint32_t ide_sectors,
++                        emes_mbr_partition_t out[4], size_t *count) {
++    if (sector==NULL || out==NULL || count==NULL || sector[510]!=0x55u || sector[511]!=0xAAu) return false;
++    size_t used=0u;
++    for (uint8_t i=0u;i<4u;i++) {
++        const uint8_t *e=sector+446u+(uint16_t)i*16u;
++        uint8_t status=e[0], type=e[4]; uint32_t first=le32(e+8), sectors=le32(e+12);
++        if (type==0u || sectors==0u) continue;
++        if ((status!=0u && status!=0x80u) || first==0u || first>ide_sectors || sectors>ide_sectors-first) return false;
++        for (size_t j=0u;j<used;j++) {
++            uint32_t a0=out[j].first_lba, a1=a0+out[j].sectors;
++            uint32_t b0=first, b1=first+sectors;
++            if (a0<b1 && b0<a1) return false;
++        }
++        out[used].index=i; out[used].bootable=status==0x80u; out[used].type=type;
++        out[used].first_lba=first; out[used].sectors=sectors; used++;
++    }
++    *count=used; return true;
++}
++
++bool emes_mbr_create_primary(uint8_t sector[512], uint32_t ide_sectors, uint8_t index,
++                             uint32_t first_lba, uint32_t sectors, uint8_t type, bool bootable) {
++    if (sector==NULL || index>=4u || !supported_type(type) || first_lba==0u || sectors<64u ||
++        first_lba>ide_sectors || sectors>ide_sectors-first_lba) return false;
++    uint8_t candidate[512]; memcpy(candidate,sector,512u); candidate[510]=0x55u; candidate[511]=0xAAu;
++    uint8_t *e=candidate+446u+(uint16_t)index*16u; memset(e,0,16u);
++    e[0]=bootable?0x80u:0u; e[1]=1u; e[2]=1u; e[4]=type; e[5]=0xFEu; e[6]=0xFFu; e[7]=0xFFu;
++    put32(e+8,first_lba); put32(e+12,sectors);
++    emes_mbr_partition_t parts[4]; size_t count=0u;
++    if (!emes_mbr_enumerate(candidate,ide_sectors,parts,&count)) return false;
++    memcpy(sector,candidate,512u); return true;
++}
++
++bool emes_fat_probe(const uint8_t boot[512], uint32_t partition_sectors, emes_fat_probe_t *out) {
++    if (boot==NULL || out==NULL || boot[510]!=0x55u || boot[511]!=0xAAu || le16(boot+11)!=512u) return false;
++    uint8_t spc=boot[13], fats=boot[16]; uint16_t reserved=le16(boot+14), roots=le16(boot+17);
++    uint32_t total=le16(boot+19); if (total==0u) total=le32(boot+32);
++    uint32_t spf=le16(boot+22); if (spf==0u) spf=le32(boot+36);
++    if (spc==0u || reserved==0u || fats==0u || spf==0u || total==0u || total>partition_sectors) return false;
++    uint32_t root_sectors=((uint32_t)roots*32u+511u)/512u;
++    uint32_t overhead=(uint32_t)reserved+(uint32_t)fats*spf+root_sectors;
++    if (overhead>=total) return false;
++    uint32_t clusters=(total-overhead)/spc; emes_fat_kind_t kind;
++    if (roots==0u) kind=EMES_FAT32; else if (clusters<4085u) kind=EMES_FAT12; else if (clusters<=65524u) kind=EMES_FAT16; else return false;
++    out->kind=kind; out->read_only=kind==EMES_FAT32; out->sectors_per_cluster=spc;
++    out->reserved_sectors=reserved; out->fat_count=fats; out->root_entries=roots;
++    out->sectors_per_fat=spf; out->total_sectors=total; out->cluster_count=clusters; return true;
++}
++
++bool emes_fat_format_boot(uint8_t boot[512], uint32_t total, emes_fat_kind_t kind,
++                          uint32_t hidden, const char *label, emes_fat_format_layout_t *layout) {
++    if (boot==NULL || layout==NULL || (kind!=EMES_FAT12 && kind!=EMES_FAT16) || total<256u) return false;
++    uint16_t roots=kind==EMES_FAT12?224u:512u; uint16_t root_sectors=(uint16_t)(((uint32_t)roots*32u+511u)/512u);
++    uint16_t spf=1u; uint32_t clusters=0u;
++    for (uint8_t pass=0u;pass<16u;pass++) {
++        uint32_t overhead=1u+2u*(uint32_t)spf+(uint32_t)root_sectors; if (overhead>=total) return false;
++        clusters=total-overhead;
++        uint32_t fat_bytes=kind==EMES_FAT12?((clusters+2u)*3u+1u)/2u:(clusters+2u)*2u;
++        uint16_t next=(uint16_t)((fat_bytes+511u)/512u); if (next==spf) break; spf=next;
++    }
++    if ((kind==EMES_FAT12 && clusters>=4085u) || (kind==EMES_FAT16 && (clusters<4085u || clusters>65524u))) return false;
++    memset(boot,0,512u); boot[0]=0xEBu; boot[1]=0x3Cu; boot[2]=0x90u; memcpy(boot+3,"EMESDOS9",8u);
++    put16(boot+11,512u); boot[13]=1u; put16(boot+14,1u); boot[16]=2u; put16(boot+17,roots);
++    if (total<65536u) put16(boot+19,(uint16_t)total); else put32(boot+32,total);
++    boot[21]=0xF8u; put16(boot+22,spf); put16(boot+24,63u); put16(boot+26,16u); put32(boot+28,hidden);
++    boot[36]=0x80u; boot[38]=0x29u; put32(boot+39,0xE9240010u);
++    memset(boot+43,' ',11u); if (label!=NULL) { for (uint8_t i=0u;i<11u && label[i]!='\0';i++) boot[43+i]=(uint8_t)label[i]; }
++    memcpy(boot+54,kind==EMES_FAT12?"FAT12   ":"FAT16   ",8u); boot[510]=0x55u; boot[511]=0xAAu;
++    layout->root_entries=roots; layout->root_sectors=root_sectors; layout->sectors_per_fat=spf; layout->sectors_per_cluster=1u;
++    return true;
++}
+diff --git a/src/emesdos09/partition_fat.h b/src/emesdos09/partition_fat.h
+new file mode 100644
+index 00000000..c7795725
+--- /dev/null
++++ b/src/emesdos09/partition_fat.h
+@@ -0,0 +1,52 @@
++#ifndef EMESDOS09_PARTITION_FAT_H
++#define EMESDOS09_PARTITION_FAT_H
++#include <stdbool.h>
++#include <stddef.h>
++#include <stdint.h>
++#define EMES_PARTITION_SECTOR_SIZE 512u
++#define EMES_PARTITION_MAX_PRIMARY 4u
++typedef enum {
++    EMES_FAT_NONE = 0,
++    EMES_FAT12 = 12,
++    EMES_FAT16 = 16,
++    EMES_FAT32 = 32
++} emes_fat_kind_t;
++typedef struct {
++    uint8_t index;
++    bool bootable;
++    uint8_t type;
++    uint32_t first_lba;
++    uint32_t sectors;
++} emes_mbr_partition_t;
++typedef struct {
++    emes_fat_kind_t kind;
++    bool read_only;
++    uint8_t sectors_per_cluster;
++    uint16_t reserved_sectors;
++    uint8_t fat_count;
++    uint16_t root_entries;
++    uint32_t sectors_per_fat;
++    uint32_t total_sectors;
++    uint32_t cluster_count;
++} emes_fat_probe_t;
++typedef struct {
++    uint16_t root_entries;
++    uint16_t root_sectors;
++    uint16_t sectors_per_fat;
++    uint8_t sectors_per_cluster;
++} emes_fat_format_layout_t;
++bool emes_mbr_enumerate(const uint8_t sector[EMES_PARTITION_SECTOR_SIZE],
++                        uint32_t ide_sectors,
++                        emes_mbr_partition_t out[EMES_PARTITION_MAX_PRIMARY],
++                        size_t *count);
++bool emes_mbr_create_primary(uint8_t sector[EMES_PARTITION_SECTOR_SIZE],
++                             uint32_t ide_sectors, uint8_t index,
++                             uint32_t first_lba, uint32_t sectors,
++                             uint8_t type, bool bootable);
++bool emes_fat_probe(const uint8_t boot[EMES_PARTITION_SECTOR_SIZE],
++                    uint32_t partition_sectors, emes_fat_probe_t *out);
++bool emes_fat_format_boot(uint8_t boot[EMES_PARTITION_SECTOR_SIZE],
++                          uint32_t total_sectors, emes_fat_kind_t kind,
++                          uint32_t hidden_sectors, const char *label,
++                          emes_fat_format_layout_t *layout);
++#endif
+diff --git a/src/part.c b/src/part.c
+index 79ea7dc5..b41bb66d 100644
+--- a/src/part.c
++++ b/src/part.c
+@@ -49,6 +49,7 @@ extern const struct cart_partdb_entry gmc_part;
+ extern const struct cart_partdb_entry idecart_part;
+ extern const struct cart_partdb_entry cocosdc_part;
+ extern const struct cart_partdb_entry cocoxsid_part;
++extern const struct cart_partdb_entry emesdos09_part;
+ extern const struct cart_partdb_entry ikon_part;
+ extern const struct cart_partdb_entry mooh_part;
+ extern const struct cart_partdb_entry mpi_part;
+@@ -110,6 +111,7 @@ const struct partdb_entry *partdb[] = {
+ #ifndef HAVE_WASM
+ 	(const struct partdb_entry *)&cocosdc_part,
+ 	(const struct partdb_entry *)&cocoxsid_part,
++	(const struct partdb_entry *)&emesdos09_part,
+ #ifdef WANT_EXPERIMENTAL
+ 	(const struct partdb_entry *)&ikon_part,
+ #endif
+diff --git a/src/xroar.c b/src/xroar.c
+index b7190660..6c497a1f 100644
+--- a/src/xroar.c
++++ b/src/xroar.c
+@@ -561,6 +561,11 @@ static char const * const default_config[] = {
+ 	"cart cocoxsid",
+ 	"cart-desc 'CoCoXSID (SID sound)'",
+ 	"cart-type cocoxsid",
++	// emesDOS09 smart cartridge: banked 16K ROM, SD controller at $FF40
++	"cart emesdos09",
++	"cart-desc 'emesDOS09 smart cartridge'",
++	"cart-type emesdos09",
++	"cart-rom emesdos09",
+ 	// CoCoSDC cartridge (implementation from the nowhereman999 fork)
+ 	"cart cocosdc",
+ 	"cart-desc 'CoCoSDC'",
+@@ -1807,6 +1812,15 @@ void xroar_eject_disk(int drive) {
+ 	ui_update_state(-1, ui_tag_disk_write_back, 0, (void *)(intptr_t)drive);
+ }
+ 
++/* The block device file attached to a slot, or NULL (for cartridges that
++ * look for it when they are created, like emesdos09). */
++const char *xroar_hd_filename(int drive) {
++	if (drive < 0 || drive > 1) {
++		return NULL;
++	}
++	return private_cfg.file.hd[drive];
++}
++
+ void xroar_insert_hd_file(int drive, const char *filename) {
+ 	if (drive < 0 || drive > 1) {
+ 		return;
+diff --git a/src/xroar.h b/src/xroar.h
+index 072683c1..947281f9 100644
+--- a/src/xroar.h
++++ b/src/xroar.h
+@@ -213,6 +213,7 @@ void xroar_insert_disk_file(int drive, const char *filename);
+ void xroar_insert_disk(int drive);
+ void xroar_eject_disk(int drive);
+ void xroar_insert_hd_file(int drive, const char *filename);
++const char *xroar_hd_filename(int drive);
+ void xroar_set_ratelimit(int action);
+ void xroar_set_ratelimit_latch(bool notify, int action);
+ void xroar_set_pause(bool notify, int action);
+-- 
+2.43.0
+

@@ -90,6 +90,13 @@ titles; Eject puts the normal cartridge back.
 disk controller ROM and SDC-DOS from a file you pick. The app recognizes the file
 by checksum and files it under the right name.
 
+**emesDOS09.** The emesDOS09 smart cartridge (a cartridge DOS with its own SD
+controller) is emulated with its project's firmware code. Put the 16K ROM in Machine >
+ROM files (or just tap it in Paks), pick "emesDOS09 smart cartridge" as the
+cartridge, and insert a raw FAT16 image under Files > emesDOS09 SD card. The
+shipped 1.0.0-rc2 ROM gets through its controller and SD checks and then stops
+on its own issue #3 (see CHANGELOG).
+
 **Sound.** Machine > Sound cartridge: Games Master Cartridge or CoCoXSID (SID chip
 at $FF40). One at a time, in the Multi-Pak with the disk controller.
 

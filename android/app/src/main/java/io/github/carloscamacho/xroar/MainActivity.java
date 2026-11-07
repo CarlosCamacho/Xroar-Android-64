@@ -77,6 +77,7 @@ public class MainActivity extends SDLActivity {
     static final int REQ_RUN = 112;
     static final int REQ_PAKADD = 113;
     static final int REQ_TYPEFILE = 114;
+    static final int REQ_EMES_IMAGE = 115;
     static final int REQ_ROM = 120;    // + RomManager.Slot ordinal
 
     static native void nativeCommand(int op, int a, int b, String s);
@@ -662,7 +663,9 @@ public class MainActivity extends SDLActivity {
                     .setPositiveButton("Install as " + right.title, (d, w) -> installRom(right, data, id))
                     .setNegativeButton("Cancel", null)
                     .show();
-        } else if (e == null && slot != RomManager.Slot.SDC) {
+        } else if (e == null && slot == RomManager.Slot.EMES && data.length != 16384) {
+            Toast.makeText(this, name + " is " + data.length + " bytes; an emesDOS09 ROM is 16384 (two 8K banks)", Toast.LENGTH_LONG).show();
+        } else if (e == null && slot != RomManager.Slot.SDC && slot != RomManager.Slot.EMES) {
             String size = data.length == 8192 || data.length == 16384 ? "" :
                     "\n\nIts size (" + data.length + " bytes) isn't what a CoCo ROM is (8192 or 16384), so it may be damaged.";
             new AlertDialog.Builder(this)
@@ -928,6 +931,16 @@ public class MainActivity extends SDLActivity {
                 addPaks(data);
                 return;
             }
+            if (req == REQ_EMES_IMAGE) {
+                String path = copyToHome(data.getData(), "emesdos");
+                if (path != null) {
+                    apply("emes_image", path);
+                }
+                if (settingsOpen && panel != null) {
+                    panel.refresh();
+                }
+                return;
+            }
             if (req == REQ_TYPEFILE) {
                 loadTypeFile(data.getData());
                 return;
@@ -967,6 +980,13 @@ public class MainActivity extends SDLActivity {
     void ejectDisk(int drive) {
         settings.remove("disk" + drive);
         command(OP_DISK_EJECT, drive, 0, null);
+        if (panel != null) {
+            panel.refresh();
+        }
+    }
+
+    void ejectEmesImage() {
+        apply("emes_image", "");
         if (panel != null) {
             panel.refresh();
         }

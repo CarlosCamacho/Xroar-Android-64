@@ -2,6 +2,37 @@
 
 ## Unreleased
 
+### v11 (versionCode 11)
+
+- **emesDOS09 smart cartridge** (patch 0006), Carlos Camacho's own cartridge DOS
+  (github.com/CarlosCamacho/EmEsDOS09): the 16K ROM in two 8K banks at `$C000`
+  (bit 7 of `$FF40` picks the bank) and the SD controller at `$FF40-$FF4F`. The
+  controller is the project's own PIC32 firmware command code (`main.c` and the
+  FAT16 modules, MIT, commit `a41c25a`), with two changes: its SD sector hooks read
+  the image file, and one `memcpy` of a 7-byte literal no longer reads 8 bytes. The
+  SD card is a raw FAT16 image attached as XRoar's hard disk 0. `EMESDOS09_TRACE=1`
+  logs every controller command.
+- App: Machine > Cartridge > "emesDOS09 smart cartridge"; Files > emesDOS09 SD card
+  (Insert / Eject, copied to `emesdos/`); Machine > ROM files > emesDOS09 ROM (saved
+  as `roms/emesdos09.rom`). Tapping a 16K emesDOS09 ROM in Paks (recognized by "DK"
+  plus its banner) now selects this cartridge instead of a plain ROM Pak.
+
+### Learned
+
+- [SIM] The shipped 1.0.0-rc2 ROM (CRC32 `b1e58f8f`) with its FAT16 image, on this
+  cartridge: RESET, IDENTIFY ("E9CT", protocol 2.2), STATUS, MEDIA, VOLUME_MOUNT,
+  RTC and both LED commands succeed, bank 1 passes the ROM test, and the ROM
+  launches the shell loader. The loader then issues commands `$3F`, `$5E`, `$15`
+  carrying 4 bytes of garbage, and the screen stops at an orange console. That
+  matches emesDOS09 issue #3 as the owner logged it on 2026-10-18 [EMU] (SWI2
+  vectors into the `E9RV` data at `$0103`, and `NEG <$40...` with DP=$FF writes the
+  `$FF4x` registers). It is a ROM bug, not the cartridge; a ROM with #3 fixed is
+  needed to go further.
+- [SIM] The firmware model reports version 0.17.0; the rc2 ROM prints "CTRL UNKNOWN"
+  for anything but 0.11.0. That is cosmetic: it accepts protocol 2.2.
+- [SRC] The firmware's `command_dir_open` copies 8 bytes from the 7-byte literal
+  `"A:\\*.*"` (gcc `-Wstringop-overread`). Reported here, not changed in that repo.
+
 ### v10 (versionCode 10)
 
 - Keycaps redrawn from the owner's four keyboard photos: the top face smaller

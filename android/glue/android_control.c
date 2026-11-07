@@ -334,11 +334,46 @@ static void eject_disk(int drive) {
 	}
 }
 
+static char cur_cart[32];
+static void apply_carts(void);
+
+/* A 16K emesDOS09 ROM: "DK" (Disk BASIC's autostart mark) at the start and the
+ * name in its banner. */
+int android_is_emesdos09_rom(const char *path) {
+	FILE *f = fopen(path, "rb");
+	if (!f) {
+		return 0;
+	}
+	static unsigned char buf[16384];
+	size_t n = fread(buf, 1, sizeof(buf), f);
+	int extra = fgetc(f) != EOF;
+	fclose(f);
+	if (n != sizeof(buf) || extra || buf[0] != 'D' || buf[1] != 'K') {
+		return 0;
+	}
+	for (size_t i = 0; i + 9 <= n; i++) {
+		if (memcmp(buf + i, "EMESDOS09", 9) == 0) {
+			return 1;
+		}
+	}
+	return 0;
+}
+
 static void open_file(const char *path, int autorun) {
 	fprintf(stderr, "android: %s %s\n", autorun ? "run" : "load", path);
 	say("%s %s", autorun ? "Running" : "Loading", base_name(path));
 	if (android_is_disk_image(path)) {
 		insert_disk(0, path, autorun);
+	} else if (android_is_emesdos09_rom(path)) {
+		// An emesDOS09 ROM needs its own cartridge (two banks and the SD
+		// controller), not a plain ROM Pak.
+		struct cart_config *ec = cart_config_by_name("emesdos09");
+		if (ec) {
+			free(ec->rom);
+			ec->rom = strdup(path);
+		}
+		snprintf(cur_cart, sizeof(cur_cart), "emesdos09");
+		apply_carts();
 	} else if (android_is_pak(path)) {
 		// A cartridge replaces whatever is in the slot, and Disk BASIC's hooks
 		// still point into the old ROM, so the machine has to be reset, and a
@@ -407,7 +442,7 @@ static const char *resolve_cart(const char *v) {
 /* The cartridge setup is two settings: "cart" (the disk cartridge: auto, rsdos,
  * cocosdc, none) and "sound" (none, gmc, cocoxsid).  With a sound cartridge
  * everything is put in a Multi-Pak: sound in slot 1, disk in slot 4. */
-static char cur_cart[32] = "auto";
+static char cur_cart[32] = "auto";  // (declared above too, for open_file)
 static char cur_sound[32] = "none";
 
 void android_set_initial_carts(const char *cart, const char *sound) {
@@ -416,6 +451,15 @@ void android_set_initial_carts(const char *cart, const char *sound) {
 }
 
 static void apply_carts(void) {
+	if (strcmp(cur_cart, "emesdos09") == 0) {
+		// The emesDOS09 cartridge is the SD interface and takes the slot
+		// (and the $FF40 registers), so it goes in alone.
+		struct cart_config *ec = cart_config_by_name("emesdos09");
+		say("Cartridge: emesDOS09%s", strcmp(cur_sound, "none") ? " (sound cartridge left out)" : "");
+		ui_update_state(-1, ui_tag_cartridge, ec ? ec->id : 0, NULL);
+		xroar_hard_reset();
+		return;
+	}
 	const char *disk = resolve_cart(cur_cart);
 	int has_disk = strcmp(disk, "none") != 0;
 	struct cart_config *cc = NULL;
@@ -480,6 +524,10 @@ static void apply_setting(char *kv) {
 	} else if (strcmp(k, "cart") == 0) {
 		snprintf(cur_cart, sizeof(cur_cart), "%s", v);
 		apply_carts();
+	} else if (strcmp(k, "emes_image") == 0) {
+		// the emesDOS09 cartridge's SD card: XRoar's hard disk 0
+		xroar_insert_hd_file(0, *v ? v : NULL);
+		say(*v ? "SD card: %s" : "SD card removed", base_name(v));
 	} else if (strcmp(k, "sound") == 0) {
 		snprintf(cur_sound, sizeof(cur_sound), "%s", v);
 		apply_carts();

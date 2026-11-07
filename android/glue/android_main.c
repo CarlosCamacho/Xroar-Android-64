@@ -247,7 +247,11 @@ int SDL_main(int argc, char **argv) {
 	char sound[32] = "none";
 	setting("sound", sound, sizeof(sound));
 	android_set_initial_carts(cart, sound);
-	if (strcmp(sound, "none") != 0) {
+	if (strcmp(cart, "emesdos09") == 0) {
+		// The emesDOS09 smart cartridge: its ROM is roms/emesdos09.rom; it
+		// takes the slot on its own (no Multi-Pak).
+		add(args, &n, "-cart", "emesdos09");
+	} else if (strcmp(sound, "none") != 0) {
 		const char *disk = strcmp(cart, "auto") == 0 ? (sdcdos ? "cocosdc" : "rsdos") : cart;
 		add(args, &n, "-cart", "mpi");
 		if (strcmp(disk, "none") != 0) {
@@ -265,6 +269,11 @@ int SDL_main(int argc, char **argv) {
 		add(args, &n, "-no-cart", NULL);
 	} else {
 		add(args, &n, "-cart", cart);
+	}
+
+	// The emesDOS09 cartridge's SD card (a raw FAT16 image) is hard disk 0.
+	if (setting("emes_image", v, sizeof(v)) && v[0]) {
+		add(args, &n, "-load-hd0", v);
 	}
 
 	// Picture defaults: "zoomed" shows just the CoCo's 256x192 screen, so it

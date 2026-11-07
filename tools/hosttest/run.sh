@@ -50,6 +50,50 @@ if [ ! -x "$B/xroar-hosttest" ] || [ -n "${REBUILD:-}" ]; then
 fi
 
 fail=0
+emes() {  # name settings-line... : boot with the emesDOS09 cartridge, print the CoCo's text screen
+	local name=$1; shift
+	local T=$W/run-$name; rm -rf "$T"; mkdir -p "$T/roms"
+	cp "$ROMS"/bas13.rom "$ROMS"/extbas11.rom "$ROMS"/disk11.rom "$T/roms/"
+	cp "$EMES_ROM_FILE" "$T/roms/emesdos09.rom"
+	cp "$EMES_IMG_FILE" "$T/sd.img"
+	: > "$T/settings.conf"; for l in "$@"; do echo "$l" >> "$T/settings.conf"; done
+	sed -i "s|@SD@|$T/sd.img|; s|@ROM@|$T/rom16k.rom|" "$T/settings.conf" "$T/settings.conf"
+	cp "$EMES_ROM_FILE" "$T/rom16k.rom"
+	[ -n "${EMES_PLAIN:-}" ] && printf 'cart plainrom\ncart-type rom\ncart-rom %s\n' "$T/rom16k.rom" >> "$T/xroar.conf"
+	(cd /; EMESDOS09_TRACE=1 XROAR_HOME=$T SCENARIO=emes SCREEN_OUT=$T/screen.bin TAIL=4 XROAR_DUMP_FRAME=$T/frame.ppm XROAR_DUMP_DELAY_MS=${EMES_SHOT_MS:-9000} \
+		EMES_ROM=$(printf %s "${EMES_TAP:+$T/rom16k.rom}") EMES_IMG=$(printf %s "${EMES_LIVE:+$T/sd.img}") \
+		SDL_VIDEODRIVER=offscreen SDL_AUDIODRIVER=dummy timeout 60 "$B/xroar-hosttest" > "$T/out.log" 2>&1 || true)
+	python3 -I -c "
+import sys
+d=open(sys.argv[1],'rb').read()
+def ch(c):
+    c&=0x7f
+    return chr(c+0x40) if c<0x20 else (chr(c) if c<0x60 else chr(c-0x40))
+for r in range(16):
+    print('  |'+''.join(ch(b) if b<0x80 else '#' for b in d[r*32:r*32+32])+'|')" "$T/screen.bin" | tee "$T/screen.txt"
+}
+if [ -n "${EMES_ROM_FILE:-}" ]; then
+	echo "== emesDOS09: the cartridge runs the ROM with the FAT16 image as its SD card"
+	emesok() {  # name: identify answered, FAT16 volume mounted (from the controller trace)
+		local L=$W/run-$1/xroar-log.txt
+		if grep -q "cmd 01 .* error 00 out 16" "$L" && grep -q "cmd 50 .* error 00 out 32" "$L"; then
+			echo "  ok   $1: controller identified, FAT16 volume mounted"
+		else
+			echo "  FAIL $1: no identify/mount in the controller trace"; fail=1
+		fi
+	}
+	# red: the same ROM as a plain ROM cartridge (what XRoar did before) finds no controller
+	EMES_PLAIN=1 emes emes-plain "cart=plainrom" > /dev/null
+	grep -q "CTRL MISSING" "$W/run-emes-plain/screen.txt" && echo "  ok   plain ROM cartridge: CTRL MISSING (the test can tell)" \
+		|| { echo "  FAIL plain ROM cartridge did not show CTRL MISSING"; fail=1; }
+	EMES_WAIT=3 emes emes-cart "cart=emesdos09" "emes_image=@SD@" > /dev/null; emesok emes-cart
+	emes emes-nosd "cart=emesdos09" > /dev/null   # no card: stays in the recovery menu
+	grep -q "ROM OK" "$W/run-emes-nosd/screen.txt" && grep -q "NO SD" "$W/run-emes-nosd/screen.txt" \
+		&& echo "  ok   no card: bank 1 answers (ROM OK), NO SD" || { echo "  FAIL bank switching / no-card report"; fail=1; }
+	EMES_WAIT=3 EMES_TAP=1 emes emes-pak "cart=none" "emes_image=@SD@" > /dev/null; emesok emes-pak
+	EMES_WAIT=3 EMES_LIVE=1 emes emes-live "cart=emesdos09" > /dev/null; emesok emes-live
+	[ "${ONLY:-}" = emes ] && { [ $fail = 0 ] && echo "ALL PASSED" || echo "FAILURES"; exit $fail; }
+fi
 run() {  # name scenario [settings.conf lines...]
 	local name=$1 sc=$2; shift 2
 	local T=$W/run-$name; rm -rf "$T"; mkdir -p "$T/roms"

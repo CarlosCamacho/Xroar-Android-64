@@ -39,5 +39,6 @@ void android_set_initial_carts(const char *cart, const char *sound);
 
 int android_is_disk_image(const char *path);
 int android_is_pak(const char *path);   // .rom or .ccc: a cartridge image
+int android_is_emesdos09_rom(const char *path);  // a 16K emesDOS09 ROM (needs its own cartridge)
 
 #endif

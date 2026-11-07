@@ -386,8 +386,8 @@ final class SettingsPanel extends LinearLayout {
                 new String[] { "4", "16", "32", "64" },
                 s.get("ram", "64"), v -> host.applyMachineSetting("ram", v))));
         add(labeled("Cartridge", spinner(
-                new String[] { "Automatic", "Disk controller (RS-DOS)", "CoCoSDC", "None" },
-                new String[] { "auto", "rsdos", "cocosdc", "none" },
+                new String[] { "Automatic", "Disk controller (RS-DOS)", "CoCoSDC", "emesDOS09 smart cartridge", "None" },
+                new String[] { "auto", "rsdos", "cocosdc", "emesdos09", "none" },
                 s.get("cart", "auto"), v -> host.apply("cart", v))));
         add(note("Automatic uses the CoCoSDC when roms/sdcdos.rom is present, "
                 + "otherwise the disk controller. Changing these restarts the emulated CoCo."));
@@ -524,6 +524,15 @@ final class SettingsPanel extends LinearLayout {
         }
         add(note("With a CoCoSDC selected, drives 1 and 2 are the SD card's, and each disk image "
                 + "can be in only one of them."));
+
+        section("EMESDOS09 SD CARD");
+        add(line("SD card:  " + shortName(s.get("emes_image", "")), TEXT));
+        add(buttonRow(
+                actionButton("Insert…", () -> host.pickFile(MainActivity.REQ_EMES_IMAGE)),
+                actionButton("Eject", () -> host.ejectEmesImage())));
+        add(note("For the emesDOS09 cartridge (Machine > Cartridge): a raw FAT16 image, superfloppy or "
+                + "partitioned. Its ROM goes in Machine > ROM files, or tap the 16K ROM in Paks. Changes the "
+                + "CoCo writes go to the app's copy in emesdos/."));
 
         section("CASSETTE");
         add(line("Tape:  " + shortName(host.tapeName()), TEXT));
