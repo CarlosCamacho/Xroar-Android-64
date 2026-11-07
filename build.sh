@@ -112,6 +112,9 @@ for ABI in $ABIS; do
 
 	step "$ABI: XRoar"
 	rm -rf "$B"; mkdir -p "$B/tools"
+	# CoCo 1/2 only: "--enable-dragon" is the Dragon/CoCo 1/2 machine family
+	# (one code base; patch 0002 removes the Dragon machine definitions),
+	# CoCo 3 and MC-10 are switched off.
 	# SDL_MAIN_HANDLED: SDL's Android headers otherwise rename main() and
 	# configure's link test fails.  The GDB target needs pthread_cancel,
 	# which Android lacks.
@@ -120,6 +123,7 @@ for ABI in $ABIS; do
 		CFLAGS="-O2 -fPIC" LDFLAGS="-Wl,-z,max-page-size=16384" PKG_CONFIG=/bin/false \
 		SDL_CFLAGS="-I$PREFIX/include/SDL2 -D_REENTRANT -DSDL_MAIN_HANDLED" \
 		SDL_LIBS="-L$PREFIX/lib -lSDL2" \
+		--enable-dragon --disable-coco3 --disable-mc10 \
 		--without-x --without-gtk3 --without-gtk2 --without-gtkgl --without-sdl3 \
 		--without-opengl --without-alsa --without-oss --without-pulse --without-evdev \
 		--without-joydev --without-libpng --disable-sdltest --disable-gdb-target \

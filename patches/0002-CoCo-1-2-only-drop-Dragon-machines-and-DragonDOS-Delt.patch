@@ -1,0 +1,193 @@
+From f8fd84ba4a18c7f97927ad5ea9793a537d03689a Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sat, 7 Nov 2026 17:44:31 +0000
+Subject: [PATCH] CoCo 1/2 only: drop Dragon machines and DragonDOS/Delta carts
+
+The Android build targets the Tandy Colour Computer 1 and 2.
+
+- xroar.c: remove the Dragon 32/64, Tano, Dragon Pro, Dragon 200-E and
+  Dragon 64 + SAMx8 machine definitions, and the dragondos and delta carts;
+  add 'default-machine cocous' to the built-in configuration.
+- machine.c: machine_config_first_working() prefers cocous, not dragon64.
+- part.c, Makefile.am: stop building dragon32/dragon64/dragonpro and
+  dragondos/deltados.
+
+CoCo 3 and MC-10 are left out at configure time (--disable-coco3
+--disable-mc10), not by this patch.
+---
+ src/Makefile.am |  7 +------
+ src/machine.c   |  8 +++-----
+ src/part.c      | 11 -----------
+ src/xroar.c     | 51 ++-----------------------------------------------
+ 4 files changed, 6 insertions(+), 71 deletions(-)
+
+diff --git a/src/Makefile.am b/src/Makefile.am
+index 91e195cc..3690b694 100644
+--- a/src/Makefile.am
++++ b/src/Makefile.am
+@@ -77,10 +77,7 @@ xroar_SOURCES += \
+ 	dragon/coco.c dragon/coco.h \
+ 	dragon/immunity.c dragon/immunity.h \
+ 	dragon/deluxecoco.c \
+-	dragon/dragon.c dragon/dragon.h \
+-	dragon/dragon32.c \
+-	dragon/dragon64.c \
+-	dragon/dragonpro.c
++	dragon/dragon.c dragon/dragon.h
+ endif
+ 
+ if MACHINE_ARCH_COCO3
+@@ -130,8 +127,6 @@ endif
+ 
+ if CART_ARCH_DRAGON
+ xroar_SOURCES += \
+-	deltados.c \
+-	dragondos.c \
+ 	gmc.c \
+ 	ide.c ide.h \
+ 	idecart.c \
+diff --git a/src/machine.c b/src/machine.c
+index 12f23cc6..1bd88430 100644
+--- a/src/machine.c
++++ b/src/machine.c
+@@ -279,10 +279,8 @@ static bool machine_is_working_config(struct machine_config *mc) {
+ }
+ 
+ struct machine_config *machine_config_first_working(void) {
+-	// dragon64 might not be first in the list, but it's been the first one
+-	// tested for the whole time, so avoid unexpected behaviour by checking
+-	// it first.
+-	struct machine_config *d64_mc = machine_config_by_name("dragon64");
++	// This build has no Dragons: check the NTSC CoCo first.
++	struct machine_config *d64_mc = machine_config_by_name("cocous");
+ 	if (machine_is_working_config(d64_mc))
+ 		return d64_mc;
+ 	// otherwise, work through the list
+@@ -291,7 +289,7 @@ struct machine_config *machine_config_first_working(void) {
+ 		if (machine_is_working_config(mc))
+ 			return mc;
+ 	}
+-	// and if none found, just return the non-working dragon64 one
++	// and if none found, just return the non-working cocous one
+ 	if (d64_mc)
+ 		return d64_mc;
+ 	assert(config_list != NULL);
+diff --git a/src/part.c b/src/part.c
+index 6256d4de..897242a8 100644
+--- a/src/part.c
++++ b/src/part.c
+@@ -39,18 +39,12 @@
+ 
+ extern const struct partdb_entry clock_group_part;
+ 
+-extern const struct machine_partdb_entry dragon32_part;
+-extern const struct machine_partdb_entry dragon32_part;
+-extern const struct machine_partdb_entry dragon64_part;
+-extern const struct machine_partdb_entry dragonpro_part;
+ extern const struct machine_partdb_entry coco_part;
+ extern const struct machine_partdb_entry deluxecoco_part;
+ extern const struct machine_partdb_entry coco3_part;
+ extern const struct machine_partdb_entry mc10_part;
+ 
+ extern const struct cart_partdb_entry cart_rom_part;
+-extern const struct cart_partdb_entry deltados_part;
+-extern const struct cart_partdb_entry dragondos_part;
+ extern const struct cart_partdb_entry gmc_part;
+ extern const struct cart_partdb_entry idecart_part;
+ extern const struct cart_partdb_entry cocosdc_part;
+@@ -94,9 +88,6 @@ const struct partdb_entry *partdb[] = {
+ 	&clock_group_part,
+ 
+ #ifdef WANT_MACHINE_ARCH_DRAGON
+-	(const struct partdb_entry *)&dragon32_part,
+-	(const struct partdb_entry *)&dragon64_part,
+-	(const struct partdb_entry *)&dragonpro_part,
+ 	(const struct partdb_entry *)&coco_part,
+ 	(const struct partdb_entry *)&deluxecoco_part,
+ #endif
+@@ -111,8 +102,6 @@ const struct partdb_entry *partdb[] = {
+ 
+ #ifdef WANT_CART_ARCH_DRAGON
+ 	(const struct partdb_entry *)&cart_rom_part,
+-	(const struct partdb_entry *)&deltados_part,
+-	(const struct partdb_entry *)&dragondos_part,
+ 	(const struct partdb_entry *)&gmc_part,
+ 	(const struct partdb_entry *)&orch90_part,
+ 	(const struct partdb_entry *)&rsdos_part,
+diff --git a/src/xroar.c b/src/xroar.c
+index 864aa606..b9734fef 100644
+--- a/src/xroar.c
++++ b/src/xroar.c
+@@ -404,48 +404,9 @@ static struct cart_config *selected_cart_config;
+ /* Default configuration */
+ 
+ static char const * const default_config[] = {
++	// Android CoCo 1/2 build: no Dragon machines, so say what we start.
++	"default-machine cocous",
+ #ifdef WANT_MACHINE_ARCH_DRAGON
+-	// Dragon 32
+-	"machine dragon32",
+-	"machine-desc 'Dragon 32'",
+-	"machine-arch dragon32",
+-	"tv-type pal",
+-	"ram 32",
+-	// Dragon 64
+-	"machine dragon64",
+-	"machine-desc 'Dragon 64'",
+-	"machine-arch dragon64",
+-	"tv-type pal",
+-	"ram 64",
+-	// Tano Dragon
+-	"machine tano",
+-	"machine-desc 'Tano Dragon (NTSC)'",
+-	"machine-arch dragon64",
+-	"tv-type ntsc",
+-	"ram 64",
+-	// Dragon Professional (Alpha)
+-	"machine dragonpro",
+-	"machine-desc 'Dragon Professional (Alpha)'",
+-	"machine-arch dragonpro",
+-	"tv-type pal",
+-	"ram 64",
+-	// Dragon 200-E
+-	"machine dragon200e",
+-	"machine-desc 'Dragon 200-E'",
+-	"machine-arch dragon64",
+-	"machine-keyboard dragon200e",
+-	"extbas @dragon200e",
+-	"altbas @dragon200e_alt",
+-	"ext-charset @dragon200e_charset",
+-	"tv-type pal",
+-	"ram 64",
+-	// Dragon 64 with SAMx8
+-	"machine dragonx8",
+-	"machine-desc 'Dragon 64 + SAMx8 (512K)'",
+-	"machine-arch dragon64",
+-	"tv-type pal",
+-	"ram 0",
+-	"machine-opt sam=samx8",
+ 	// CoCo
+ 	"machine coco",
+ 	"machine-desc 'Tandy CoCo (PAL)'",
+@@ -554,18 +515,10 @@ static char const * const default_config[] = {
+ #endif
+ 
+ #ifdef WANT_CART_ARCH_DRAGON
+-	// DragonDOS
+-	"cart dragondos",
+-	"cart-desc DragonDOS",
+-	"cart-type dragondos",
+ 	// RSDOS
+ 	"cart rsdos",
+ 	"cart-desc RS-DOS",
+ 	"cart-type rsdos",
+-	// Delta
+-	"cart delta",
+-	"cart-desc 'Delta System'",
+-	"cart-type delta",
+ #ifndef HAVE_WASM
+ 	// RSDOS w/ Becker port
+ 	"cart becker",
+-- 
+2.43.0
+

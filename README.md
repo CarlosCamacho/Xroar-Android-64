@@ -1,7 +1,8 @@
 # Xroar-Android-64
 
 [XRoar](https://www.6809.org.uk/xroar/), Ciaran Anscomb's Dragon and Tandy
-Color Computer emulator, built for current Android phones: **64-bit ARM**
+Color Computer emulator, built for current Android phones and trimmed to the
+**Tandy Color Computer 1 and 2** (no CoCo 3, no Dragons, no MC-10): **64-bit ARM**
 (`arm64-v8a`), 32-bit ARM (`armeabi-v7a`) and `x86_64` (Chromebooks), Android
 7.0 (API 24) and later, with 16 KB page alignment for Android 15+.
 
@@ -28,7 +29,7 @@ managers writing there, but `Android/media/<package>/` stays open to them.)
 
 | Path | What it is |
 |---|---|
-| `roms/` | ROM images (`coco3.rom`, `bas13.rom`, `extbas11.rom`, `disk11.rom`, `sdcdos.rom`, ...); the folder itself is searched too |
+| `roms/` | ROM images (`bas13.rom`, `extbas11.rom`, `disk11.rom`, `sdcdos.rom`, ...); the folder itself is searched too |
 | `xroar.conf` | Starter config: touch as the right joystick; documents the machine and CoCoSDC options |
 | `sdcard/` | The CoCoSDC's SD card: `.DSK` images, optional `STARTUP.CFG` (`0=GAME.DSK`) |
 | `xroar-log.txt` | Everything XRoar printed this run; send it with any bug report |
@@ -39,23 +40,17 @@ computer over USB, or with
 `adb push FILE /sdcard/Android/media/io.github.carloscamacho.xroar/roms/`.
 Launch the app once first so the folder exists, then restart it after adding files.
 
-**Which machine starts.** If `xroar.conf` has no `default-machine` line, the app
-looks at the ROMs: `coco3.rom` gives a CoCo 3 (`coco3`); otherwise `bas13.rom`
-(or `bas12`/`bas11`/`bas10`) gives an NTSC CoCo 1/2 (`cocous`), which also uses
-`extbas11.rom` and, as the disk cartridge, `disk11.rom`. Set `default-machine`
-in `xroar.conf` to override. CoCoTosh needs a CoCo 3, so it needs `coco3.rom`.
-
-- **Back button** shows or hides the on-screen keyboard. A Bluetooth keyboard
-  gives you BREAK, CLEAR and XRoar's shortcut keys.
-- **Touch** drives the right joystick (`joy-right mjoy0`); a touch is the fire button.
-- **"Open with XRoar"** on a `.DSK`, `.CAS`, `.WAV`, `.BIN` or `.ROM` file loads
-  it and tries to autorun it, whether or not XRoar is already running.
+**Which machine starts.** An NTSC CoCo (`cocous`). It needs `bas13.rom` (or
+`bas12`/`bas11`/`bas10`) for Color BASIC, `extbas11.rom` (or `extbas10`) for
+Extended BASIC, and `disk11.rom` (or `disk10`) as the disk controller. Other
+machines in this build, chosen with `default-machine` in `xroar.conf`: `coco`
+(PAL), `coco2b` (PAL, 6847T1), `coco2bus` (NTSC, 6847T1), `deluxecoco`, `mx1600`
+and `cp400`.
 
 ### CoCoSDC
 
 Put the SDC-DOS ROM in `roms/` as `sdcdos.rom` (it is not bundled). When it is
-there, the default machine is a CoCo, and `xroar.conf` has no `machine-cart`
-line, the app plugs in a CoCoSDC and serves `sdcard/` as its SD card. Without
+there and `xroar.conf` has no `machine-cart` line, the app plugs in a CoCoSDC and serves `sdcard/` as its SD card. Without
 the ROM you keep the normal floppy controller.
 
 "Open with" on a disk image then copies it to `sdcard/OPENED/`, mounts it as
@@ -65,8 +60,7 @@ to that copy, and opening the same file again replaces it.
 To choose the cartridge yourself, add to `xroar.conf`:
 
 ```
-machine coco3
-  machine-cart cocosdc     # or: machine-cart rsdos
+machine-cart cocosdc     # or: machine-cart rsdos
 ```
 
 ## Building
@@ -92,13 +86,17 @@ with one key cannot be installed over one signed with another; uninstall first.
   in `XROAR_HOME`, redirects the log, writes the starter
   config, adds `-sdc-root` and `-cart cocosdc` when they apply, and maps Back
   to the on-screen keyboard.
-- `build.sh` compiles XRoar unchanged apart from the patch, then rebuilds two
+- `build.sh` compiles XRoar unchanged apart from the patches, then rebuilds two
   objects with one rename each: `main_unix.c` with `-Dmain=xroar_unix_main`, and
   `sdl2/ui_sdl2.c` with `-Dxroar_run=android_xroar_run`. That second hook lets
   a file opened while XRoar runs be loaded on the emulator thread.
 - `MainActivity.java` loads `libSDL2.so` and `libmain.so`, copies a
   `content://` file into `opened/`, and passes it to native code.
 - Build-time settings, each forced by Android:
+  - CoCo 1/2 only: configure is run with `--disable-coco3 --disable-mc10`, and
+    patch 0002 removes the Dragon machine and cart definitions and stops
+    building the Dragon-only parts. The Dragon and CoCo 1/2 machines share one
+    code base, so there is no configure switch for the Dragons alone.
   - minSdk 24, for bionic's complex-math functions and 32-bit `fseeko`.
   - The GDB target is off, because Android has no `pthread_cancel`.
   - `SDL_MAIN_HANDLED` is set, so SDL doesn't rename `main()`.
@@ -125,6 +123,13 @@ harness, **[SRC]** read from source.
   selects `coco3`; a `default-machine` line in `xroar.conf` wins. The Java
   side (`getExternalMediaDirs`, `XROAR_HOME`) is **not** exercised by the
   harness.
+- [SIM] The CoCo 1/2-only build on the same harness with the owner's real
+  `bas13.rom`, `extbas11.rom` and `disk11.rom` (XRoar's CRC list identifies them
+  as Colour BASIC 1.3, Extended Colour BASIC 1.1 and Disk Extended Colour BASIC
+  1.1): it starts `cocous` with the disk cartridge, and BASIC lines typed at the
+  emulated keyboard (`OPEN "O",#-1` and `PRINT #-1,"..." ;2+2`) came out of the
+  emulated cassette port, with `2+2` computed. Video, sound, touch and disks
+  were not exercised.
 - [SRC] The CoCoSDC code was reviewed but **has not been executed**. Paths stay
   inside the SD folder, buffers are bounded, and there is no networking except
   an opt-in Becker port. The fork's own test programs are included in the patch

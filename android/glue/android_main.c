@@ -39,10 +39,11 @@ static const char *starter_conf =
 "# phone.  Put ROM images in the same folder, or in its roms/ subfolder.\n"
 "# Full option list: https://www.6809.org.uk/xroar/doc/xroar.shtml\n"
 "\n"
-"# Which machine to start.  If this is not set, the app picks one from the\n"
-"# ROMs it finds: coco3.rom -> coco3, else bas13.rom (etc.) -> cocous.\n"
-"# Choices: coco3, cocous (NTSC CoCo 1/2), coco (PAL), coco2bus, dragon64, ...\n"
-"# default-machine coco3\n"
+"# Which machine to start.  This build is CoCo 1/2 only; the default is\n"
+"# cocous (NTSC).  Others: coco (PAL), coco2b (PAL, 6847T1), coco2bus (NTSC,\n"
+"# 6847T1).  It needs bas13.rom (or bas12/bas11/bas10) and, for Extended\n"
+"# BASIC, extbas11.rom (or extbas10); disk11.rom is the disk controller.\n"
+"# default-machine cocous\n"
 "\n"
 "# Touching the screen moves the right joystick; touch = fire button.\n"
 "joy-right mjoy0\n"
@@ -53,13 +54,11 @@ static const char *starter_conf =
 "# CoCoSDC\n"
 "# The SD card is the sdcard/ folder next to this file: put .DSK images\n"
 "# there, and optionally a STARTUP.CFG with lines like  0=GAME.DSK\n"
-"# When the SDC-DOS ROM is present (roms/sdcdos.rom) and the machine is a\n"
-"# CoCo, the app plugs in a CoCoSDC by itself.  To choose the cartridge\n"
-"# yourself instead, uncomment ONE of these pairs:\n"
-"# machine coco3\n"
-"#   machine-cart cocosdc\n"
-"# machine coco3\n"
-"#   machine-cart rsdos\n"
+"# When the SDC-DOS ROM is present (roms/sdcdos.rom), the app plugs in a\n"
+"# CoCoSDC by itself.  To choose the cartridge yourself instead, uncomment\n"
+"# ONE of these:\n"
+"# machine-cart cocosdc\n"
+"# machine-cart rsdos\n"
 "# To use a different folder as the SD card:\n"
 "# sdc-root ~/sdcard\n";
 
@@ -116,8 +115,6 @@ static int rom_present(const char *const *names) {
 }
 
 static const char *const sdcdos_names[] = { "sdcdos", "sdc-dos", "sdc_dos", "SDCDOS", NULL };
-static const char *const coco3_names[] = { "coco3", NULL };
-static const char *const cocobas_names[] = { "bas13", "bas12", "bas11", "bas10", NULL };
 
 static int is_disk_image(const char *path) {
 	const char *dot = strrchr(path, '.');
@@ -193,22 +190,17 @@ int SDL_main(int argc, char **argv) {
 		args[n++] = "-sdc-root";
 		args[n++] = sdroot;
 	}
+	// Machine: from xroar.conf, else the build's default (cocous).
 	char machine[64] = "";
 	conf_has("default-machine", machine, sizeof(machine));
 	if (!machine[0]) {
-		// Not chosen in xroar.conf: pick what the ROMs in the folder can run.
-		snprintf(machine, sizeof(machine), "%s",
-			 rom_present(coco3_names) ? "coco3" :
-			 rom_present(cocobas_names) ? "cocous" : "coco3");
-		args[n++] = "-default-machine";
-		args[n++] = machine;
+		snprintf(machine, sizeof(machine), "cocous");
 	}
-	int coco = strncmp(machine, "coco", 4) == 0;
 	int sdcdos = rom_present(sdcdos_names);
 	int user_cart = conf_has("machine-cart", NULL, 0);
 	fprintf(stderr, "android: machine '%s', sdcdos.rom %s, machine-cart in xroar.conf: %s\n",
 		machine, sdcdos ? "found" : "not found", user_cart ? "yes" : "no");
-	if (coco && sdcdos && !user_cart) {
+	if (sdcdos && !user_cart) {
 		args[n++] = "-cart";
 		args[n++] = "cocosdc";
 	}
@@ -310,10 +302,7 @@ static void android_open(const char *path) {
 			int err = cocosdc_mount_host(c, 0, dest);
 			if (err == 0) {
 				fprintf(stderr, "android: CoCoSDC drive 0 = %s\n", dest);
-				const char *arch = xroar.machine->config->architecture;
-				if (strcmp(arch, "coco") == 0 || strcmp(arch, "coco3") == 0) {
-					ak_parse_type_string(xroar.auto_kbd, "\\025DOS\\r");
-				}
+				ak_parse_type_string(xroar.auto_kbd, "\\025DOS\\r");
 				return;
 			}
 			fprintf(stderr, "android: CoCoSDC mount of %s failed (%d); using a floppy drive\n", dest, err);
