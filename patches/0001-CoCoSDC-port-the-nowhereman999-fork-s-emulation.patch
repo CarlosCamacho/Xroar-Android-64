@@ -1,0 +1,5804 @@
+From 79aaa8ddb50ae7dc903354d689a2f0c5c66176e8 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sat, 7 Nov 2026 17:27:21 +0000
+Subject: [PATCH] CoCoSDC: port the nowhereman999 fork's emulation onto
+ upstream
+
+Takes src/cocosdc*.c/h and the three CoCoSDC host test programs from
+https://github.com/nowhereman999/xroar at 39ff26093eb852b74d5297b926e794c7b7a04089
+onto upstream 128d7c645fc2ed96cc9425f163dc5b927ca32d91, replacing upstream's
+ROM-and-latch stub.
+
+- Build cocosdc without --enable-experimental (Makefile.am, part.c).
+- Cart profile 'cocosdc' defaults cart-rom @sdcdos; romlist sdcdos.
+- New option -sdc-root DIR (xroar.c, xroar.h).
+- Front-end hooks for the Android build: cocosdc_sd_root(),
+  cocosdc_mount_host() (cocosdc.h) and sdc_fs_mount_host().
+---
+ src/Makefile.am               |    4 +-
+ src/cocosdc.c                 |  748 +++++++++++---
+ src/cocosdc.h                 |   19 +
+ src/cocosdc_fdc.c             |  291 ++++++
+ src/cocosdc_fdc.h             |  123 +++
+ src/cocosdc_fs.c              | 1576 ++++++++++++++++++++++++++++++
+ src/cocosdc_fs.h              |  126 +++
+ src/cocosdc_hw.h              |  379 ++++++++
+ src/part.c                    |    2 +-
+ src/xroar.c                   |   10 +-
+ src/xroar.h                   |    5 +
+ tools/cocosdc_fs_test.c       | 1723 +++++++++++++++++++++++++++++++++
+ tools/cocosdc_hw_test.c       |  305 ++++++
+ tools/cocosdc_io_error_test.c |  125 +++
+ tools/run-cocosdc-tests.sh    |   40 +
+ 15 files changed, 5346 insertions(+), 130 deletions(-)
+ create mode 100644 src/cocosdc.h
+ create mode 100644 src/cocosdc_fdc.c
+ create mode 100644 src/cocosdc_fdc.h
+ create mode 100644 src/cocosdc_fs.c
+ create mode 100644 src/cocosdc_fs.h
+ create mode 100644 src/cocosdc_hw.h
+ create mode 100644 tools/cocosdc_fs_test.c
+ create mode 100644 tools/cocosdc_hw_test.c
+ create mode 100644 tools/cocosdc_io_error_test.c
+ create mode 100755 tools/run-cocosdc-tests.sh
+
+diff --git a/src/Makefile.am b/src/Makefile.am
+index c8b1c17e..91e195cc 100644
+--- a/src/Makefile.am
++++ b/src/Makefile.am
+@@ -143,11 +143,13 @@ xroar_SOURCES += \
+ 	sn76489.c sn76489.h \
+ 	spi65.c spi65.h \
+ 	spi_sdcard.c \
++	cocosdc.c cocosdc.h cocosdc_hw.h \
++	cocosdc_fs.c cocosdc_fs.h \
++	cocosdc_fdc.c cocosdc_fdc.h \
+ 	wd279x.c wd279x.h
+ 
+ if EXPERIMENTAL
+ xroar_SOURCES += \
+-	cocosdc.c \
+ 	ikon.c
+ endif
+ endif
+diff --git a/src/cocosdc.c b/src/cocosdc.c
+index 08951e9b..f842fcf3 100644
+--- a/src/cocosdc.c
++++ b/src/cocosdc.c
+@@ -1,83 +1,143 @@
+-/* CoCoSDC cartridge.
++/** \file
+  *
+- * Copyright 2026 Ciaran Anscomb
++ *  \brief CoCoSDC cartridge (Phase D).
+  *
+- * This file is part of XRoar, a Dragon/Tandy CoCo emulator.
++ *  Maps the SCS register contract used by Studio's CommSDC client onto a
++ *  host directory (-sdc-root).  Mount/eject, directory/info/CWD, and
++ *  256-byte logical sector R/W follow SDC_FileAccess.asm.  Stream $90/$91
++ *  (512-byte sectors) follows SDC_StreamFile_Library.asm / SDC_BigLoadm.asm
++ *  / SDC_Play.asm (open/stream/abort; DAC timing is not in this layer).
++ *  When $FF40 is not $43, WD1773-ish FDC registers serve SDC-DOS Disk BASIC
++ *  LOAD/RUN/LOADM on an M: mounted DSK.  STARTUP.CFG auto-mounts at attach.
++ *  -cart-becker (the existing cart flag) opens the Becker port on P2
++ *  $FF41 (status) and $FF42 (data) so FujiNet-PC can sit beside -sdc-root.
++ *  $FF42 is also the flash data helper; Becker wins while the port is
++ *  open.  $FF43 flash bank and $FF40/$FF48–$FF4B SDC/FDC are unchanged.
++ *  The built-in profile defaults cart-rom @sdcdos (sdcdos.rom on the ROM
++ *  path) so Hardware → Cartridge → CoCoSDC and CLI -cart cocosdc both boot
++ *  SDC-DOS when that image is present.  -cart-rom still overrides.
+  *
+- * XRoar is free software; you can redistribute it and/or modify it under the
+- * terms of the GNU General Public License as published by the Free Software
+- * Foundation, either version 3 of the License, or (at your option) any later
+- * version.
++ *  This is not a VCC SDC.dll port.
+  *
+- * See COPYING.GPL for redistribution conditions.
+- */
+-
+-/* Sources
++ *  \licenseblock This file is part of XRoar, a Dragon/Tandy CoCo emulator.
++ *
++ *  XRoar is free software; you can redistribute it and/or modify it under the
++ *  terms of the GNU General Public License as published by the Free Software
++ *  Foundation, either version 3 of the License, or (at your option) any later
++ *  version.
+  *
+- * - CoCo SDC User Guide
+- * - CoCo SDC Technical Info
++ *  See COPYING.GPL for redistribution conditions.
++ *
++ *  \endlicenseblock
+  */
+ 
+ #include "top-config.h"
+ 
+ #include <assert.h>
++#include <stdbool.h>
+ #include <stdint.h>
++#include <stdio.h>
+ #include <stdlib.h>
+ #include <string.h>
++#include <sys/stat.h>
+ 
+ #include "array.h"
+-#include "delegate.h"
+ #include "sds.h"
++#include "xalloc.h"
+ 
++#include "becker.h"
+ #include "cart.h"
++#include "cocosdc_fdc.h"
++#include "cocosdc_fs.h"
++#include "cocosdc_hw.h"
+ #include "logging.h"
+ #include "part.h"
+-//#include "rom.h"
++#include "path.h"
+ #include "rombank.h"
+-#include "romlist.h"
+ #include "serialise.h"
++#include "xconfig.h"
++#include "xroar.h"
+ 
+ struct cocosdc {
+ 	struct cart cart;
+-	unsigned latch_old;
+-	unsigned latch_drive_select;
+-	bool latch_motor_enable;
+-	bool latch_precomp_enable;
+-	bool latch_density;
+-	bool latch_nmi_enable;
++	struct sdc_hw hw;
++	struct sdc_fdc fdc;
++	struct sdc_fs fs;
++	char *root;
++	uint8_t flash_data;
++	uint8_t flash_bank;
++	struct becker *becker;
++	bool becker_selected;
+ };
+ 
++#define COCOSDC_SER_HW_BLOCK (10)
++
+ static const struct ser_struct ser_struct_cocosdc[] = {
+ 	SER_ID_STRUCT_NEST(1, &cart_ser_struct_data),
+-	SER_ID_STRUCT_ELEM(2, struct cocosdc, latch_drive_select),
+-	SER_ID_STRUCT_ELEM(3, struct cocosdc, latch_motor_enable),
+-	SER_ID_STRUCT_ELEM(4, struct cocosdc, latch_precomp_enable),
+-	SER_ID_STRUCT_ELEM(5, struct cocosdc, latch_density),
+-	SER_ID_STRUCT_ELEM(6, struct cocosdc, latch_nmi_enable),
++	SER_ID_STRUCT_ELEM(2, struct cocosdc, root),
++	SER_ID_STRUCT_ELEM(3, struct cocosdc, hw.cmd_mode),
++	SER_ID_STRUCT_ELEM(4, struct cocosdc, hw.latch),
++	SER_ID_STRUCT_ELEM(5, struct cocosdc, hw.status),
++	SER_ID_STRUCT_ELEM(6, struct cocosdc, hw.cmd),
++	SER_ID_STRUCT_ELEM(7, struct cocosdc, hw.preg[0]),
++	SER_ID_STRUCT_ELEM(8, struct cocosdc, hw.preg[1]),
++	SER_ID_STRUCT_ELEM(9, struct cocosdc, hw.preg[2]),
++	SER_ID_STRUCT_UNHANDLED(COCOSDC_SER_HW_BLOCK),
++	SER_ID_STRUCT_ELEM(11, struct cocosdc, hw.xfer_index),
++	SER_ID_STRUCT_ELEM(12, struct cocosdc, hw.xfer),
++	SER_ID_STRUCT_ELEM(13, struct cocosdc, fs.cwd_rel),
++	SER_ID_STRUCT_ELEM(14, struct cocosdc, fs.slot[0].host_path),
++	SER_ID_STRUCT_ELEM(15, struct cocosdc, fs.slot[1].host_path),
++	SER_ID_STRUCT_ELEM(16, struct cocosdc, hw.latched_preg[0]),
++	SER_ID_STRUCT_ELEM(17, struct cocosdc, hw.latched_preg[1]),
++	SER_ID_STRUCT_ELEM(18, struct cocosdc, hw.latched_preg[2]),
++	SER_ID_STRUCT_ELEM(19, struct cocosdc, hw.xfer_limit),
++	SER_ID_STRUCT_ELEM(20, struct cocosdc, hw.streaming),
++	SER_ID_STRUCT_ELEM(21, struct cocosdc, hw.stream_8bit),
++	SER_ID_STRUCT_ELEM(22, struct cocosdc, fs.stream_off),
++	SER_ID_STRUCT_ELEM(23, struct cocosdc, fs.stream_end),
+ };
+ 
++static bool cocosdc_read_elem(void *sptr, struct ser_handle *sh, int tag);
++static bool cocosdc_write_elem(void *sptr, struct ser_handle *sh, int tag);
++
+ static const struct ser_struct_data cocosdc_ser_struct_data = {
+ 	.elems = ser_struct_cocosdc,
+ 	.num_elems = ARRAY_N_ELEMENTS(ser_struct_cocosdc),
++	.read_elem = cocosdc_read_elem,
++	.write_elem = cocosdc_write_elem,
+ };
+ 
+-// - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
++static struct xconfig_option const cocosdc_options[] = {
++	{ XCO_SET_STRING_NE("sdc-root", struct cocosdc, root) },
++};
+ 
+-static void cocosdc_config_complete(struct cart_config *);
++static const struct xconfig_set cocosdc_option_set = {
++	ARRAY_N_ELEMENTS(cocosdc_options),
++	cocosdc_options
++};
++
++// - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+ 
+-/* Cart interface */
+ static uint8_t cocosdc_read(struct cart *c, uint16_t A, bool P2, bool R2, uint8_t D);
+ static uint8_t cocosdc_write(struct cart *c, uint16_t A, bool P2, bool R2, uint8_t D);
+ static void cocosdc_reset(struct cart *c, bool hard);
++static void cocosdc_attach(struct cart *c);
+ static void cocosdc_detach(struct cart *c);
+ 
+-/* Latch */
+-static void latch_write(struct cocosdc *n, unsigned D);
++static void cocosdc_config_complete(struct cart_config *);
++static void cocosdc_apply_root(struct cocosdc *sdc);
++static void cocosdc_log_startup(struct cocosdc *sdc, int err, const char *when);
++static void cocosdc_log_fdc_dir(struct cocosdc *sdc);
++static int cocosdc_apply_startup(struct cocosdc *sdc, const char *when);
++static void cocosdc_log_completed(struct cocosdc *sdc);
++static void cocosdc_update_lines(struct cocosdc *sdc);
++static void cocosdc_log_rom(struct cart *c);
++static int cocosdc_rom_loaded(struct cart *c);
++static void strip_root_quotes(char *s);
+ 
+ // - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+ 
+-// CoCoSDC part creation
+-
+ static struct part *cocosdc_allocate(void);
+ static void cocosdc_initialise(struct part *p, void *options);
+ static bool cocosdc_finish(struct part *p);
+@@ -94,97 +154,453 @@ static const struct partdb_entry_funcs cocosdc_funcs = {
+ 	.is_a = dragon_cart_is_a,
+ };
+ 
+-const struct cart_partdb_entry cocosdc_part = { .partdb_entry = { .name = "cocosdc", .description = "Darren Atkinson | CoCoSDC", .funcs = &cocosdc_funcs }, .config_complete = cocosdc_config_complete };
++const struct cart_partdb_entry cocosdc_part = {
++	.partdb_entry = {
++		.name = "cocosdc",
++		.description = "Darren Atkinson | CoCoSDC (SDC-DOS floppy)",
++		.funcs = &cocosdc_funcs
++	},
++	.config_complete = cocosdc_config_complete
++};
+ 
+ static struct part *cocosdc_allocate(void) {
+-	struct cocosdc *n = part_new(sizeof(*n));
+-	struct cart *c = &n->cart;
++	struct cocosdc *sdc = part_new(sizeof(*sdc));
++	struct cart *c = &sdc->cart;
+ 	struct part *p = &c->part;
+ 
+-	*n = (struct cocosdc){0};
++	*sdc = (struct cocosdc){0};
+ 
+ 	cart_rom_init(c);
+ 
+-	c->detach = cocosdc_detach;
+ 	c->read = cocosdc_read;
+ 	c->write = cocosdc_write;
+ 	c->reset = cocosdc_reset;
++	c->attach = cocosdc_attach;
++	c->detach = cocosdc_detach;
++
++	sdc->becker_selected = false;
++	sdc_hw_reset(&sdc->hw);
++	sdc_fdc_reset(&sdc->fdc);
++	sdc_fs_init(&sdc->fs);
+ 
+ 	return p;
+ }
+ 
+ static void cocosdc_initialise(struct part *p, void *options) {
+-	struct cart *c = (struct cart *)p;
+ 	struct cart_config *cc = options;
+ 	assert(cc != NULL);
+ 
+-	c->config = cc;
++	struct cocosdc *sdc = (struct cocosdc *)p;
++
++	cart_rom_initialise(p, options);
++
++	xconfig_parse_list_struct(&cocosdc_option_set, cc->opts, sdc);
+ }
+ 
+ static bool cocosdc_finish(struct part *p) {
+-	struct cocosdc *n = (struct cocosdc *)p;
+-	struct cart *c = &n->cart;
++	struct cocosdc *sdc = (struct cocosdc *)p;
++	struct cart *c = &sdc->cart;
+ 
+-	// 8 * 16K ROM image
+-	c->ROM = rombank_new(8, 16384, 8);
++	if (!cart_rom_finish(p)) {
++		return 0;
++	}
++
++	cocosdc_log_rom(c);
+ 
+-	{
+-		sds tmp = romlist_find("sdcdos");
+-		if (tmp) {
+-			rombank_load_image(c->ROM, 0, tmp, 0);
++	if (!sdc->root && xroar.cfg.sdc.root) {
++		sdc->root = xstrdup(xroar.cfg.sdc.root);
++	}
++	if (sdc->root) {
++		strip_root_quotes(sdc->root);
++	}
++	cocosdc_apply_root(sdc);
++
++	/* Same flag as rsdos/mooh/idecart.  becker_open() uses -becker-ip /
++	 * -becker-port (default 127.0.0.1:65504).  A failed connect leaves
++	 * the pointer NULL so $FF42 stays the flash data helper. */
++	if (c->config && c->config->becker_port) {
++		sdc->becker = becker_open();
++		if (sdc->becker) {
++			LOG_MOD_DEBUG(1, "cocosdc",
++				      "Becker port open ($FF41 status, $FF42 data; "
++				      "read status to select Becker at $FF42)\n");
++		}
++#ifndef WANT_BECKER
++		else {
++			LOG_MOD_WARN("cocosdc",
++				     "-cart-becker set but this build has no Becker support\n");
+ 		}
+-		sdsfree(tmp);
++#endif
++	}
+ 
+-		tmp = romlist_find("@rsdos");
+-		if (tmp) {
+-			rombank_load_image(c->ROM, 1, tmp, 0);
++	return 1;
++}
++
++static void cocosdc_free(struct part *p) {
++	struct cocosdc *sdc = (struct cocosdc *)p;
++	becker_close(sdc->becker);
++	sdc->becker = NULL;
++	sdc_fs_flush(&sdc->fs);
++	sdc_fs_free(&sdc->fs);
++	free(sdc->root);
++	sdc->root = NULL;
++	cart_rom_free(p);
++}
++
++static bool cocosdc_read_elem(void *sptr, struct ser_handle *sh, int tag) {
++	struct cocosdc *sdc = sptr;
++	switch (tag) {
++	case COCOSDC_SER_HW_BLOCK:
++		ser_read(sh, sdc->hw.block, SDC_STREAM_SIZE);
++		return 1;
++	default:
++		return 0;
++	}
++}
++
++static bool cocosdc_write_elem(void *sptr, struct ser_handle *sh, int tag) {
++	struct cocosdc *sdc = sptr;
++	switch (tag) {
++	case COCOSDC_SER_HW_BLOCK:
++		ser_write(sh, tag, sdc->hw.block, SDC_STREAM_SIZE);
++		return 1;
++	default:
++		return 0;
++	}
++}
++
++// - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
++
++static void strip_root_quotes(char *s) {
++	size_t n;
++	if (!s || s[0] == 0) {
++		return;
++	}
++	n = strlen(s);
++	if (n >= 2 && ((s[0] == '"' && s[n - 1] == '"') || (s[0] == '\'' && s[n - 1] == '\''))) {
++		memmove(s, s + 1, n - 2);
++		s[n - 2] = 0;
++	}
++}
++
++static void cocosdc_config_complete(struct cart_config *cc) {
++	/* Same pattern as rsdos/ide: menu Hardware → Cartridge and -cart
++	 * cocosdc share this profile.  Without a default ROM, $C000 is empty
++	 * and Hard Reset falls through to ECB / Super ECB. */
++	if (!cc->rom_dfn && !cc->rom) {
++		cc->rom = xstrdup("@sdcdos");
++	}
++}
++
++static int cocosdc_rom_loaded(struct cart *c) {
++	unsigned i;
++
++	if (!c || !c->ROM) {
++		return 0;
++	}
++	for (i = 0; i < c->ROM->nslots; i++) {
++		if (c->ROM->d[i]) {
++			return 1;
+ 		}
+-		sdsfree(tmp);
++	}
++	return 0;
++}
++
++static void cocosdc_log_rom(struct cart *c) {
++	const char *want;
++	const char *rompath;
++
++	want = (c && c->config && c->config->rom) ? c->config->rom : "(none)";
++	rompath = xroar.cfg.file.rompath ? xroar.cfg.file.rompath : "";
++
++	if (cocosdc_rom_loaded(c)) {
++		const char *file = c->ROM->slot[0].filename;
++		LOG_MOD_DEBUG(1, "cocosdc", "SDC-DOS ROM loaded: %s\n",
++			      file ? file : want);
++		return;
++	}
++
++	/* Default log level is 1, but CRC32 INVALID is DEBUG-only.  Menu
++	 * CoCoSDC after Floppy otherwise looks like a working cart (checkmark)
++	 * sitting on a green ECB OK prompt. */
++	LOG_MOD_ERROR("cocosdc",
++		     "SDC-DOS ROM not found (cart-rom %s, rompath %s). "
++		     "Cartridge stays selected but $C000 is empty, so Hard Reset "
++		     "boots ECB / Super ECB OK. Place sdcdos.rom in the ROM path "
++		     "(macOS: ~/Library/XRoar/roms/) or pass -cart-rom FILE.\n",
++		     want, rompath[0] ? rompath : "(default)");
++}
+ 
+-		tmp = romlist_find("dplus-sdc");
+-		if (tmp) {
+-			rombank_load_image(c->ROM, 4, tmp, 0);
++static void cocosdc_log_startup(struct cocosdc *sdc, int err, const char *when) {
++	int any = 0;
++	int i;
++
++	for (i = 0; i < SDC_SLOTS; i++) {
++		if (sdc->fs.slot[i].host_path) {
++			any = 1;
++			LOG_MOD_DEBUG(1, "cocosdc", "STARTUP.CFG %s drive %d: %s%s\n",
++				      when, i, sdc->fs.slot[i].host_path,
++				      sdc->fs.slot[i].fdc_ok ? " (FDC)" : " (not FDC)");
++			LOG_MOD_DEBUG_FDC(LOG_FDC_EVENTS, "cocosdc",
++					  "STARTUP.CFG %s drive %d: %s fdc_ok=%d\n",
++					  when, i, sdc->fs.slot[i].host_path,
++					  sdc->fs.slot[i].fdc_ok);
++			if (!sdc->fs.slot[i].fdc_ok) {
++				LOG_MOD_WARN("cocosdc", "STARTUP.CFG %s drive %d mounted '%s' but FDC is not ready (raw m: image?)\n",
++					     when, i, sdc->fs.slot[i].host_path);
++			}
+ 		}
+-		sdsfree(tmp);
++	}
++	if (!any) {
++		if (err == 1) {
++			LOG_MOD_DEBUG(1, "cocosdc", "STARTUP.CFG %s: no STARTUP.CFG in %s\n",
++				      when, sdc->fs.root ? sdc->fs.root : "(no root)");
++		} else if (err) {
++			LOG_MOD_WARN("cocosdc", "STARTUP.CFG %s: 0=/1= mount failed (%s, $%02X)\n",
++				     when, sdc_fs_err_name(err), err & 0xff);
++		} else {
++			LOG_MOD_DEBUG(1, "cocosdc", "STARTUP.CFG %s: file present but no 0=/1= disk mounted\n",
++				      when);
++		}
++	}
++	fflush(stdout);
++	fflush(stderr);
++}
+ 
+-		tmp = romlist_find("@dragondos_compat");
+-		if (tmp) {
+-			rombank_load_image(c->ROM, 5, tmp, 0);
++static int fdc_printable_name(const uint8_t *b, char out[12]) {
++	unsigned i;
++	for (i = 0; i < 11; i++) {
++		if (b[i] < 32 || b[i] > 126) {
++			return 0;
+ 		}
+-		sdsfree(tmp);
++		out[i] = (char)b[i];
+ 	}
++	out[11] = 0;
++	return 1;
++}
+ 
+-	rombank_report(c->ROM, "cocosdc", "ROM");
++/* DECB DIR starts at T17 S3.  A catalog parked on S2 (the FAT) looks fine to a
++ * host hex dump of track 17 but DIR prints nothing. */
++static void cocosdc_log_fdc_dir(struct cocosdc *sdc) {
++	char name[12];
++	uint8_t fat[SDC_BLOCK_SIZE];
++	uint8_t first;
+ 
+-	return 1;
++	if (!sdc->fdc.drq || sdc->fdc.track != 17 || sdc->fdc.sector != 3) {
++		return;
++	}
++	if (fdc_printable_name(sdc->fdc.buf, name)) {
++		LOG_MOD_DEBUG(1, "cocosdc", "FDC DECB DIR T17 S3: \"%s\"\n", name);
++		return;
++	}
++	first = sdc->fdc.buf[0];
++	if (sdc_fs_fdc_read(&sdc->fs, sdc->fdc.drive, 17, 2, 0, fat) == 0 &&
++	    fdc_printable_name(fat, name)) {
++		LOG_MOD_WARN("cocosdc",
++			     "DECB DIR T17 S3 is empty ($%02X); T17 S2 looks like a catalog \"%s\". "
++			     "Disk BASIC lists sectors 3-11; the FAT belongs on sector 2.\n",
++			     first, name);
++	} else {
++		LOG_MOD_DEBUG(1, "cocosdc", "FDC DECB DIR T17 S3 first byte $%02X (empty catalog)\n",
++			      first);
++	}
+ }
+ 
+-static void cocosdc_free(struct part *p) {
+-	struct cocosdc *n = (struct cocosdc *)p;
+-	struct cart *c = &n->cart;
+-	rombank_free(c->ROM);
++static int cocosdc_apply_startup(struct cocosdc *sdc, const char *when) {
++	int err = sdc_fs_apply_startup(&sdc->fs);
++	cocosdc_log_startup(sdc, err, when);
++	return err;
+ }
+ 
+-// - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
++static void cocosdc_apply_root(struct cocosdc *sdc) {
++	int err;
+ 
+-static void cocosdc_config_complete(struct cart_config *cc) {
+-	(void)cc;
++	if (!sdc->root || !sdc->root[0]) {
++		LOG_MOD_DEBUG(1, "cocosdc", "no SD card root; use -sdc-root DIR or -cart-opt sdc-root=DIR\n");
++		return;
++	}
++
++	sds expanded = path_interp(sdc->root);
++	if (expanded && expanded[0]) {
++		free(sdc->root);
++		sdc->root = xstrdup(expanded);
++	}
++	sdsfree(expanded);
++	strip_root_quotes(sdc->root);
++
++	struct stat st;
++	if (stat(sdc->root, &st) != 0) {
++		LOG_MOD_WARN("cocosdc", "SD card root '%s' not found\n", sdc->root);
++		(void)sdc_fs_set_root(&sdc->fs, sdc->root);
++		return;
++	}
++	if (!S_ISDIR(st.st_mode)) {
++		LOG_MOD_WARN("cocosdc", "SD card root '%s' is not a directory\n", sdc->root);
++		return;
++	}
++	if (sdc_fs_set_root(&sdc->fs, sdc->root) != 0) {
++		LOG_MOD_WARN("cocosdc", "SD card root '%s' could not be opened\n", sdc->root);
++		return;
++	}
++	LOG_MOD_DEBUG(1, "cocosdc", "SD card root: %s\n", sdc->root);
++	if (sdc->fs.slot[0].host_path || sdc->fs.slot[1].host_path) {
++		err = 0;
++	} else {
++		/* Distinguish missing CFG from a failed 0= mount. */
++		err = sdc_fs_apply_startup(&sdc->fs);
++	}
++	cocosdc_log_startup(sdc, err, "attach");
++}
++
++static void cocosdc_log_payload(const struct cocosdc *sdc) {
++	char name[SDC_BLOCK_SIZE + 1];
++	unsigned n = 0;
++	while (n < SDC_BLOCK_SIZE && sdc->hw.block[n] != 0) {
++		char ch = (char)sdc->hw.block[n];
++		if (ch < 32 || ch > 126) {
++			ch = '.';
++		}
++		name[n++] = ch;
++	}
++	name[n] = 0;
++	LOG_MOD_DEBUG(2, "cocosdc", "payload \"%s\" (%u bytes)\n", name, sdc->hw.xfer_index ? SDC_BLOCK_SIZE : n);
++}
++
++static void cocosdc_log_completed(struct cocosdc *sdc) {
++	if (!sdc->hw.completed) {
++		return;
++	}
++	sdc->hw.completed = false;
++
++	unsigned family = sdc->hw.cmd & 0xfe;
++	unsigned drive = sdc->hw.cmd & 0x01;
++
++	if (logging.level < 2) {
++		return;
++	}
++
++	switch (family) {
++	case 0xc0:
++		if (sdc->hw.preg[0] == 'V') {
++			LOG_MOD_DEBUG(2, "cocosdc", "VERSION -> %02x%02x (BCD)\n",
++				      sdc->hw.preg[1], sdc->hw.preg[2]);
++		} else if (sdc->hw.preg[0] == 'I') {
++			LOG_MOD_DEBUG(2, "cocosdc", "INFO drive %u\n", drive);
++		} else if (sdc->hw.preg[0] == '>') {
++			LOG_MOD_DEBUG(2, "cocosdc", "DIR page\n");
++		} else if (sdc->hw.preg[0] == 'C') {
++			LOG_MOD_DEBUG(2, "cocosdc", "CWD\n");
++		} else {
++			LOG_MOD_DEBUG(2, "cocosdc", "ext $%02X param=$%02X (drive %u)\n",
++				      sdc->hw.cmd, sdc->hw.preg[0], drive);
++		}
++		break;
++	case 0xe0:
++		if (sdc->hw.status & SDC_FAILED) {
++			LOG_MOD_DEBUG(2, "cocosdc", "mount/ext-data $%02X FAILED status=$%02X\n",
++				      sdc->hw.cmd, sdc->hw.status);
++		} else {
++			LOG_MOD_DEBUG(2, "cocosdc", "mount/ext-data $%02X\n", sdc->hw.cmd);
++		}
++		cocosdc_log_payload(sdc);
++		break;
++	case 0xa0:
++	case 0xa2:
++		LOG_MOD_DEBUG(2, "cocosdc", "write LSN $%02X%s\n", sdc->hw.cmd,
++			      (sdc->hw.status & SDC_FAILED) ? " FAILED" : "");
++		break;
++	case 0x80:
++	case 0x82:
++	case 0x84:
++	case 0x86:
++		LOG_MOD_DEBUG(2, "cocosdc", "read LSN $%02X%s\n", sdc->hw.cmd,
++			      (sdc->hw.status & SDC_FAILED) ? " FAILED" : "");
++		break;
++	case 0x90:
++	case 0x92:
++		LOG_MOD_DEBUG(2, "cocosdc", "stream $%02X%s\n", sdc->hw.cmd,
++			      (sdc->hw.status & SDC_FAILED) ? " FAILED" : "");
++		break;
++	default:
++		if (sdc->hw.cmd == 0x1c) {
++			LOG_MOD_DEBUG(2, "cocosdc", "reset/program-mode handshake (PM)\n");
++		} else if (sdc->hw.cmd == 0xd0) {
++			LOG_MOD_DEBUG(2, "cocosdc", "abort $D0\n");
++		} else {
++			LOG_MOD_DEBUG(2, "cocosdc", "cmd $%02X\n", sdc->hw.cmd);
++		}
++		break;
++	}
++}
++
++static void cocosdc_update_lines(struct cocosdc *sdc) {
++	struct cart *c = &sdc->cart;
++	if (sdc->hw.cmd_mode) {
++		DELEGATE_CALL(c->signal_halt, 0);
++		DELEGATE_CALL(c->signal_nmi, 0);
++		return;
++	}
++	DELEGATE_CALL(c->signal_halt, sdc_fdc_want_halt(&sdc->fdc) ? 1 : 0);
++	DELEGATE_CALL(c->signal_nmi, sdc_fdc_want_nmi(&sdc->fdc) ? 1 : 0);
++}
++
++static uint8_t cocosdc_flash_read(struct cocosdc *sdc, int reg) {
++	if (reg == 0x02) {
++		return sdc->flash_data;
++	}
++	/* SDC-DOS probes $FF43: bank in bits 0-2, last data in 3-7. */
++	return (uint8_t)((sdc->flash_bank & 0x07) | (sdc->flash_data & 0xf8));
++}
++
++static void cocosdc_flash_write(struct cocosdc *sdc, int reg, uint8_t D) {
++	if (reg == 0x02) {
++		sdc->flash_data = D;
++	} else {
++		sdc->flash_bank = (uint8_t)(D & 0x07);
++	}
+ }
+ 
+ static void cocosdc_reset(struct cart *c, bool hard) {
+-	struct cocosdc *n = (struct cocosdc *)c;
++	struct cocosdc *sdc = (struct cocosdc *)c;
+ 	cart_rom_reset(c, hard);
+-	n->latch_old = -1;
+-	latch_write(n, 0);
++	sdc->becker_selected = false;
++	sdc_hw_reset(&sdc->hw);
++	sdc_fdc_reset(&sdc->fdc);
++	if (hard) {
++		sdc_fs_reset(&sdc->fs);
++		(void)cocosdc_apply_startup(sdc, "hard reset");
++	}
++	if (sdc->becker) {
++		becker_reset(sdc->becker);
++	}
++	cocosdc_update_lines(sdc);
++}
++
++static void cocosdc_attach(struct cart *c) {
++	struct cocosdc *sdc = (struct cocosdc *)c;
++	cart_rom_attach(c);
++	/* Finish already applied the root.  Re-apply STARTUP.CFG if a hard
++	 * reset later unmounted, or if attach races ahead of finish on some
++	 * hosts: only mount when drive 0 is empty and a root exists. */
++	if (sdc->fs.root && !sdc->fs.slot[0].host_path) {
++		(void)cocosdc_apply_startup(sdc, "cart attach");
++	}
+ }
+ 
+ static void cocosdc_detach(struct cart *c) {
+-	/* struct cocosdc *n = (struct cocosdc *)c; */
++	struct cocosdc *sdc = (struct cocosdc *)c;
++	sdc_fs_flush(&sdc->fs);
++	if (sdc->becker) {
++		becker_reset(sdc->becker);
++	}
+ 	cart_rom_detach(c);
+ }
+ 
+ static uint8_t cocosdc_read(struct cart *c, uint16_t A, bool P2, bool R2, uint8_t D) {
+-	/* struct cocosdc *n = (struct cocosdc *)c; */
++	struct cocosdc *sdc = (struct cocosdc *)c;
++	int cls;
++	int reg;
++
+ 	if (R2) {
+ 		rombank_d8(c->ROM, A, &D);
+ 		return D;
+@@ -192,17 +608,53 @@ static uint8_t cocosdc_read(struct cart *c, uint16_t A, bool P2, bool R2, uint8_
+ 	if (!P2) {
+ 		return D;
+ 	}
+-	if ((A & 0xc) == 0) {
+-		// XXX FDC read
++
++	/* Becker before flash so $FF42 talks to FujiNet when -cart-becker
++	 * connected.  SDC registers are classified separately and fall
++	 * through below. */
++	/* $FF42 is shared with the SDC flash probe.  A Becker status read
++	 * selects the network data register; a flash-bank access selects
++	 * flash again.  The unambiguous $FF46 alias is always Becker. */
++	if (A == 0xff43) {
++		sdc->becker_selected = false;
++	}
++	cls = cocosdc_p2_class(A, sdc->becker != NULL);
++	if (A == 0xff42 && !sdc->becker_selected) {
++		cls = COCOSDC_P2_FLASH;
++	}
++	if (cls == COCOSDC_P2_BECKER_STATUS) {
++		sdc->becker_selected = true;
++		return becker_read_status(sdc->becker);
+ 	}
+-	if (!(A & 8))
++	if (cls == COCOSDC_P2_BECKER_DATA) {
++		return becker_read_data(sdc->becker);
++	}
++	if (cls == COCOSDC_P2_FLASH) {
++		return cocosdc_flash_read(sdc, (int)(A & 0x0f));
++	}
++
++	reg = sdc_hw_reg(A);
++	if (reg < 0) {
++		return D;
++	}
++	if (sdc->hw.cmd_mode) {
++		D = sdc_hw_read(&sdc->hw, reg);
++		if (sdc->hw.cmd_ready) {
++			sdc_fs_execute(&sdc->fs, &sdc->hw);
++		}
++		cocosdc_log_completed(sdc);
+ 		return D;
++	}
++	D = sdc_fdc_read(&sdc->fdc, &sdc->fs, reg);
++	cocosdc_update_lines(sdc);
+ 	return D;
+ }
+ 
+ static uint8_t cocosdc_write(struct cart *c, uint16_t A, bool P2, bool R2, uint8_t D) {
+-	struct cocosdc *n = (struct cocosdc *)c;
+-	(void)R2;
++	struct cocosdc *sdc = (struct cocosdc *)c;
++	int cls;
++	int reg;
++
+ 	if (R2) {
+ 		rombank_d8(c->ROM, A, &D);
+ 		return D;
+@@ -210,62 +662,106 @@ static uint8_t cocosdc_write(struct cart *c, uint16_t A, bool P2, bool R2, uint8
+ 	if (!P2) {
+ 		return D;
+ 	}
+-	if ((A & 0xc) == 0) {
+-		// XXX FDC write
++
++	/* $FF42 is shared with the SDC flash probe.  A Becker status read
++	 * selects the network data register; a flash-bank access selects
++	 * flash again.  The unambiguous $FF46 alias is always Becker. */
++	if (A == 0xff43) {
++		sdc->becker_selected = false;
++	}
++	cls = cocosdc_p2_class(A, sdc->becker != NULL);
++	if (A == 0xff42 && !sdc->becker_selected) {
++		cls = COCOSDC_P2_FLASH;
++	}
++	if (cls == COCOSDC_P2_BECKER_DATA) {
++		becker_write_data(sdc->becker, D);
+ 		return D;
+ 	}
+-	if (!(A & 8))
++	if (cls == COCOSDC_P2_BECKER_STATUS) {
++		/* Status is read-only, same as rsdos. */
+ 		return D;
+-	latch_write(n, D);
+-	return D;
+-}
++	}
++	if (cls == COCOSDC_P2_FLASH) {
++		cocosdc_flash_write(sdc, (int)(A & 0x0f), D);
++		return D;
++	}
+ 
+-// - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
++	reg = sdc_hw_reg(A);
++	if (reg < 0) {
++		return D;
++	}
+ 
+-static void latch_write(struct cocosdc *n, unsigned D) {
+-	if (D != n->latch_old) {
+-		LOG_MOD_DEBUG(2, "cocosdc", "config reg: ");
+-		if ((D ^ n->latch_old) & 0x03) {
+-			LOG_DEBUG(2, "DRIVE SELECT %01u, ", D & 0x03);
++	if (reg == 0x00) {
++		sdc_hw_write(&sdc->hw, reg, D);
++		if (D == SDC_CMDMODE) {
++			sdc->fdc.halt_enable = 0;
++			sdc->fdc.drq = 0;
++			sdc_fdc_set_intrq(&sdc->fdc, 0);
++			sdc->fdc.status = 0;
++		} else {
++			sdc_fdc_write(&sdc->fdc, &sdc->fs, 0x00, D);
+ 		}
+-		if ((D ^ n->latch_old) & 0x04) {
+-			LOG_DEBUG(2, "MOTOR %s, ", (D & 0x04)?"ON":"OFF");
+-		}
+-		if ((D ^ n->latch_old) & 0x08) {
+-			LOG_DEBUG(2, "DENSITY %s, ", (D & 0x08)?"SINGLE":"DOUBLE");
+-		}
+-		if ((D ^ n->latch_old) & 0x10) {
+-			LOG_DEBUG(2, "PRECOMP %s, ", (D & 0x10)?"ON":"OFF");
++		cocosdc_update_lines(sdc);
++		return D;
++	}
++
++	if (sdc->hw.cmd_mode) {
++		sdc_hw_write(&sdc->hw, reg, D);
++		if (sdc->hw.cmd_ready) {
++			sdc_fs_execute(&sdc->fs, &sdc->hw);
+ 		}
+-		if ((D ^ n->latch_old) & 0x20) {
+-			LOG_DEBUG(2, "NMI %s, ", (D & 0x20)?"ENABLED":"DISABLED");
++		cocosdc_log_completed(sdc);
++		return D;
++	}
++
++	if (logging.level >= 2 && reg == 0x08) {
++		LOG_MOD_DEBUG(2, "cocosdc", "FDC cmd $%02X drv=%u tr=%u se=%u side=%u nmi=%d\n",
++			      D, sdc->fdc.drive, sdc->fdc.track, sdc->fdc.sector, sdc->fdc.side,
++			      sdc->fdc.nmi_enable);
++	}
++	sdc_fdc_write(&sdc->fdc, &sdc->fs, reg, D);
++	if (reg == 0x08 && (D & 0xe0) == 0x80 && sdc->fdc.drq) {
++		char peek[12];
++		if (fdc_printable_name(sdc->fdc.buf, peek)) {
++			LOG_MOD_DEBUG(2, "cocosdc", "FDC read T%u S%u \"%s\"\n",
++				      sdc->fdc.track, sdc->fdc.sector, peek);
++		} else {
++			LOG_MOD_DEBUG(2, "cocosdc", "FDC read T%u S%u first=$%02X\n",
++				      sdc->fdc.track, sdc->fdc.sector, sdc->fdc.buf[0]);
+ 		}
+-		LOG_DEBUG(2, "\n");
+-		n->latch_old = D;
+-	}
+-	n->latch_drive_select = D & 0x03;
+-	n->latch_motor_enable = D & 0x04;
+-	n->latch_density = D & 0x08;
+-	n->latch_precomp_enable = D & 0x10;
+-	n->latch_nmi_enable = D & 0x20;
++		cocosdc_log_fdc_dir(sdc);
++	}
++	if ((logging.level >= 2 || (logging.debug_fdc & LOG_FDC_EVENTS)) && reg == 0x08) {
++		LOG_MOD_DEBUG(2, "cocosdc", "FDC status=$%02X%s%s%s ready=%d\n", sdc->fdc.status,
++			      sdc->fdc.drq ? " DRQ" : "", sdc->fdc.intrq ? " INTRQ" : "",
++			      sdc_fdc_want_nmi(&sdc->fdc) ? " NMI" : "",
++			      sdc_fs_fdc_ready(&sdc->fs, sdc->fdc.drive));
++		LOG_MOD_DEBUG_FDC(LOG_FDC_EVENTS, "cocosdc",
++				  "FDC cmd $%02X status=$%02X fdc_ok=%d\n",
++				  D, sdc->fdc.status,
++				  sdc_fs_fdc_ready(&sdc->fs, sdc->fdc.drive));
++	}
++	cocosdc_update_lines(sdc);
++	return D;
+ }
+ 
+-/*
+-static void set_drq(void *sptr, bool value) {
+-	struct cocosdc *n = sptr;
+-	struct cart *c = &n->cart;
+-	DELEGATE_CALL(c->signal_firq, value);
++// - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
++
++// Front-end hooks (used by the Android build's "Open with").  Both return
++// failure when the cartridge is not a CoCoSDC.
++
++const char *cocosdc_sd_root(struct cart *c) {
++	if (!c || !part_is_a(&c->part, "cocosdc")) {
++		return NULL;
++	}
++	struct cocosdc *sdc = (struct cocosdc *)c;
++	return sdc->fs.root;
+ }
+ 
+-static void set_intrq(void *sptr, bool value) {
+-	struct cocosdc *n = sptr;
+-	struct cart *c = &n->cart;
+-	if (value) {
+-		if (n->latch_nmi_enable) {
+-			DELEGATE_CALL(c->signal_nmi, 1);
+-		}
+-	} else {
+-		DELEGATE_CALL(c->signal_nmi, 0);
++int cocosdc_mount_host(struct cart *c, unsigned drive, const char *host_path) {
++	if (!c || !part_is_a(&c->part, "cocosdc")) {
++		return -1;
+ 	}
++	struct cocosdc *sdc = (struct cocosdc *)c;
++	return sdc_fs_mount_host(&sdc->fs, drive, host_path);
+ }
+-*/
+diff --git a/src/cocosdc.h b/src/cocosdc.h
+new file mode 100644
+index 00000000..c7102206
+--- /dev/null
++++ b/src/cocosdc.h
+@@ -0,0 +1,19 @@
++/* CoCoSDC cartridge: front-end hooks.
++ *
++ * This file is part of XRoar, a Dragon/Tandy CoCo emulator.  GPL-3.0-or-later.
++ */
++
++#ifndef XROAR_COCOSDC_H_
++#define XROAR_COCOSDC_H_
++
++struct cart;
++
++// Host directory serving as the SD card, or NULL if c is not a CoCoSDC (or
++// has no root).
++const char *cocosdc_sd_root(struct cart *c);
++
++// Mount host_path (which must lie under the SD root) as SDC drive 0 or 1.
++// Returns 0 on success, -1 if c is not a CoCoSDC, else an SDC_ERR_* code.
++int cocosdc_mount_host(struct cart *c, unsigned drive, const char *host_path);
++
++#endif
+diff --git a/src/cocosdc_fdc.c b/src/cocosdc_fdc.c
+new file mode 100644
+index 00000000..c793a7fe
+--- /dev/null
++++ b/src/cocosdc_fdc.c
+@@ -0,0 +1,291 @@
++/** \file
++ *
++ *  \brief CoCoSDC floppy-emulation commands (WD1773-ish).
++ *
++ *  Restore/seek complete immediately with BUSY clear and no INTRQ (DECB
++ *  DSKCON polls $FF48 bit 0; VCC's working SDC Seek is the same).  Read/
++ *  write sector maps CHS through sdc_fs_fdc_read/write onto a mounted M:
++ *  image.  Write-track ($F0/$F4, DSKINI) fills that track's 18 sectors
++ *  with $FF in the same host file.  m: raw mounts report NOTREADY on the
++ *  FDC path (User Guide: FDC is not supported for raw blocks).
++ *
++ *  Type II/III NOTREADY stays BUSY without DRQ or INTRQ so DECB's DRQ poll
++ *  times out to ?IO ERROR.  Instant INTRQ is taken as NMI while NMIFLG is
++ *  set; DECB then ANDA #$7C, hides NOTREADY, and DIR "succeeds" with zeros.
++ *
++ *  While DRQ is set, $FF4A and $FF4B both supply data so SDC-DOS can use
++ *  8-bit LDA $FF4B or 16-bit LDU $FF4A.
++ */
++
++#include "top-config.h"
++
++#include <string.h>
++
++#include "cocosdc_fdc.h"
++
++static uint8_t fdc_type2_ok(void) {
++	/* Type II bit 2 is LOST DATA, not TRACK0.  Finishing a sector on
++	 * track 0 with idle_status made DECB ANDA #$7C treat START.BAS as
++	 * lost-data (?IO) after DIR (track 17) had already listed it. */
++	return 0;
++}
++
++static uint8_t fdc_take_rx(struct sdc_fdc *f, struct sdc_fs *fs) {
++	uint8_t v;
++
++	(void)fs;
++	if (!f->drq || f->writing || f->buf_i >= f->buf_n) {
++		return f->data;
++	}
++	v = f->buf[f->buf_i++];
++	f->data = v;
++	if (f->buf_i >= f->buf_n) {
++		sdc_fdc_finish(f, fdc_type2_ok());
++	} else {
++		f->status = (uint8_t)(SDC_FLP_BUSY | SDC_FLP_DRQ);
++	}
++	return v;
++}
++
++static void fdc_put_tx(struct sdc_fdc *f, struct sdc_fs *fs, uint8_t D) {
++	int rc;
++
++	f->data = D;
++	if (!f->drq || !f->writing || f->buf_i >= f->buf_n) {
++		return;
++	}
++	f->buf[f->buf_i++] = D;
++	if (f->buf_i >= f->buf_n) {
++		rc = sdc_fs_fdc_write(fs, f->drive, f->track, f->sector,
++				      f->side, f->buf);
++		if (rc == SDC_FDC_NOTREADY) {
++			/* Same as a Type II read: do not NMI; stay busy. */
++			f->writing = 0;
++			f->buf_i = 0;
++			f->buf_n = 0;
++			f->drq = 0;
++			f->intrq = 0;
++			f->status = (uint8_t)(SDC_FLP_BUSY | SDC_FLP_NOTREADY);
++		} else if (rc == SDC_FDC_WP) {
++			sdc_fdc_finish(f, SDC_FLP_WP);
++		} else if (rc != 0) {
++			sdc_fdc_finish(f, SDC_FLP_RNF);
++		} else {
++			sdc_fdc_finish(f, fdc_type2_ok());
++		}
++	} else {
++		f->status = (uint8_t)(SDC_FLP_BUSY | SDC_FLP_DRQ);
++	}
++}
++
++static void fdc_type2_not_ready(struct sdc_fdc *f) {
++	f->writing = 0;
++	f->buf_i = 0;
++	f->buf_n = 0;
++	f->drq = 0;
++	f->intrq = 0;
++	f->status = (uint8_t)(SDC_FLP_BUSY | SDC_FLP_NOTREADY);
++}
++
++static void fdc_type1_done(struct sdc_fdc *f, struct sdc_fs *fs) {
++	/* DECB LD7D1 waits for !BUSY after Restore/Seek.  Raising INTRQ here
++	 * NMIs (DSKCON already wrote $FF40 bit 5) and, if NMIFLG is set,
++	 * returns DCSTA=0 with DBUF untouched — blank DIR / SAVE that never
++	 * hits the host file. */
++	f->intrq = 0;
++	f->drq = 0;
++	f->writing = 0;
++	f->buf_i = 0;
++	f->buf_n = 0;
++	f->status = sdc_fdc_idle_status(fs, f);
++}
++
++static void fdc_write_track(struct sdc_fdc *f, struct sdc_fs *fs) {
++	uint8_t fill[SDC_BLOCK_SIZE];
++	unsigned sec;
++	int rc;
++
++	if (!sdc_fs_fdc_ready(fs, f->drive)) {
++		fdc_type2_not_ready(f);
++		return;
++	}
++	if (sdc_fs_fdc_wp(fs, f->drive)) {
++		sdc_fdc_finish(f, SDC_FLP_WP);
++		return;
++	}
++	/* DSKINI $F4 streams a raw track then NMIs.  A DSK image has no
++	 * IDAMs — fill the 18 logical sectors so the host file changes. */
++	memset(fill, 0xff, sizeof(fill));
++	for (sec = 1; sec <= SDC_FLOPPY_SPT; sec++) {
++		rc = sdc_fs_fdc_write(fs, f->drive, f->track, (uint8_t)sec,
++				      f->side, fill);
++		if (rc == SDC_FDC_NOTREADY) {
++			fdc_type2_not_ready(f);
++			return;
++		}
++		if (rc == SDC_FDC_WP) {
++			sdc_fdc_finish(f, SDC_FLP_WP);
++			return;
++		}
++		if (rc != 0) {
++			sdc_fdc_finish(f, SDC_FLP_RNF);
++			return;
++		}
++	}
++	sdc_fdc_finish(f, fdc_type2_ok());
++}
++
++void sdc_fdc_command(struct sdc_fdc *f, struct sdc_fs *fs, uint8_t cmd) {
++	unsigned family = cmd >> 4;
++	int rc;
++
++	f->cmd = cmd;
++	f->writing = 0;
++	f->buf_i = 0;
++	f->buf_n = 0;
++	f->drq = 0;
++	f->intrq = 0; /* WD1773: command write clears INTRQ */
++
++	switch (family) {
++	case 0x0: /* Restore */
++		f->track = 0;
++		fdc_type1_done(f, fs);
++		break;
++	case 0x1: /* Seek: track := data register */
++		f->track = f->data;
++		fdc_type1_done(f, fs);
++		break;
++	case 0x2: /* Step */
++	case 0x3:
++		fdc_type1_done(f, fs);
++		break;
++	case 0x4: /* Step in */
++	case 0x5:
++		if (f->track < 255) {
++			f->track++;
++		}
++		fdc_type1_done(f, fs);
++		break;
++	case 0x6: /* Step out */
++	case 0x7:
++		if (f->track > 0) {
++			f->track--;
++		}
++		fdc_type1_done(f, fs);
++		break;
++	case 0x8: /* Read sector */
++	case 0x9:
++		if (!sdc_fs_fdc_ready(fs, f->drive)) {
++			fdc_type2_not_ready(f);
++			break;
++		}
++		memset(f->buf, 0, sizeof(f->buf));
++		rc = sdc_fs_fdc_read(fs, f->drive, f->track, f->sector, f->side, f->buf);
++		if (rc == SDC_FDC_NOTREADY) {
++			fdc_type2_not_ready(f);
++		} else if (rc != 0) {
++			sdc_fdc_finish(f, (uint8_t)(SDC_FLP_RNF | ((rc == SDC_FDC_WP) ? SDC_FLP_WP : 0)));
++		} else {
++			f->buf_n = SDC_BLOCK_SIZE;
++			sdc_fdc_start_drq(f, 0);
++		}
++		break;
++	case 0xa: /* Write sector */
++	case 0xb:
++		if (!sdc_fs_fdc_ready(fs, f->drive)) {
++			fdc_type2_not_ready(f);
++		} else if (sdc_fs_fdc_wp(fs, f->drive)) {
++			sdc_fdc_finish(f, SDC_FLP_WP);
++		} else {
++			memset(f->buf, 0, sizeof(f->buf));
++			f->buf_n = SDC_BLOCK_SIZE;
++			sdc_fdc_start_drq(f, 1);
++		}
++		break;
++	case 0xc: /* Read address — not needed for DECB DSKCON */
++		sdc_fdc_finish(f, SDC_FLP_RNF | sdc_fdc_idle_status(fs, f));
++		break;
++	case 0xd: /* Force interrupt */
++		f->status = sdc_fdc_idle_status(fs, f);
++		f->drq = 0;
++		if (cmd & 0x08) {
++			sdc_fdc_set_intrq(f, 1);
++		} else {
++			f->intrq = 0;
++		}
++		break;
++	case 0xe: /* Read track */
++		sdc_fdc_finish(f, SDC_FLP_RNF | sdc_fdc_idle_status(fs, f));
++		break;
++	case 0xf: /* Write track (DSKINI $F4) */
++		fdc_write_track(f, fs);
++		break;
++	default:
++		sdc_fdc_finish(f, SDC_FLP_RNF | sdc_fdc_idle_status(fs, f));
++		break;
++	}
++}
++
++uint8_t sdc_fdc_read(struct sdc_fdc *f, struct sdc_fs *fs, int reg) {
++	switch (reg) {
++	case 0x08:
++		/* Reading status clears INTRQ (WD1773). */
++		if (f->intrq && !f->drq) {
++			f->intrq = 0;
++		}
++		return f->status;
++	case 0x09:
++		return f->track;
++	case 0x0a:
++		/* During a sector transfer both DATREGA ($FF4A) and DATREGB
++		 * ($FF4B) present data so LDU $FF4A works.  Otherwise this is
++		 * the WD1773 sector register. */
++		if (f->drq) {
++			return fdc_take_rx(f, fs);
++		}
++		return f->sector;
++	case 0x0b:
++		return fdc_take_rx(f, fs);
++	default:
++		return 0;
++	}
++}
++
++void sdc_fdc_write(struct sdc_fdc *f, struct sdc_fs *fs, int reg, uint8_t D) {
++	switch (reg) {
++	case 0x00: {
++		unsigned new_drive = f->drive;
++		if (D & 0x01) {
++			new_drive = 0;
++		} else if (D & 0x02) {
++			new_drive = 1;
++		}
++		f->drive = new_drive;
++		f->side = (D & 0x40) ? 1u : 0u;
++		f->nmi_enable = (D & 0x20) ? 1 : 0;
++		f->halt_enable = (D & 0x80) ? 1 : 0;
++		if (f->intrq) {
++			f->halt_enable = 0;
++		}
++		break;
++	}
++	case 0x08:
++		sdc_fdc_command(f, fs, D);
++		break;
++	case 0x09:
++		f->track = D;
++		break;
++	case 0x0a:
++		if (f->drq && f->writing) {
++			fdc_put_tx(f, fs, D);
++		} else {
++			f->sector = D;
++		}
++		break;
++	case 0x0b:
++		fdc_put_tx(f, fs, D);
++		break;
++	default:
++		break;
++	}
++}
+diff --git a/src/cocosdc_fdc.h b/src/cocosdc_fdc.h
+new file mode 100644
+index 00000000..2189b368
+--- /dev/null
++++ b/src/cocosdc_fdc.h
+@@ -0,0 +1,123 @@
++/** \file
++ *
++ *  \brief CoCoSDC WD1773-style floppy-emulation registers.
++ *
++ *  When $FF40 is not $43, CoCoSDC looks like a Tandy FDC so SDC-DOS Disk
++ *  BASIC DSKCON (LOAD/RUN/LOADM/DIR) can read a mounted DSK image:
++ *
++ *  - $FF40 drive control (drive 0/1, side, halt enable)
++ *  - $FF48 command / status
++ *  - $FF49 track, $FF4A sector, $FF4B data
++ *
++ *  Status bits match a WD1773 type II/III read: BUSY, DRQ, RNF, WP,
++ *  NOTREADY.  Type I (restore/seek/step) completes immediately with BUSY
++ *  clear and does **not** raise INTRQ (DECB polls !BUSY; VCC Seek is the
++ *  same).  Instant Type I INTRQ with $FF40 bit 5 already on is an NMI that
++ *  can abort DSKCON with an empty buffer (blank DIR, SAVE never fwrite's).
++ *  This is not a cycle-accurate WD chip — sectors are supplied from the
++ *  host file as soon as the command is written (VCC sdc.dll approach).
++ */
++
++#ifndef XROAR_COCOSDC_FDC_H_
++#define XROAR_COCOSDC_FDC_H_
++
++#include <stdint.h>
++#include <string.h>
++
++#include "cocosdc_fs.h"
++
++#define SDC_FLP_BUSY     (0x01)
++#define SDC_FLP_DRQ      (0x02)
++#define SDC_FLP_LOST     (0x04)
++#define SDC_FLP_CRC      (0x08)
++#define SDC_FLP_RNF      (0x10)
++#define SDC_FLP_SEEKERR  (0x10)
++#define SDC_FLP_FAULT    (0x20)
++#define SDC_FLP_TRACK0   (0x04)
++#define SDC_FLP_WP       (0x40)
++#define SDC_FLP_NOTREADY (0x80)
++
++struct sdc_fdc {
++	uint8_t track;
++	uint8_t sector;
++	uint8_t data;
++	uint8_t status;
++	uint8_t cmd;
++	unsigned drive;
++	unsigned side;
++	int halt_enable;
++	int nmi_enable; /* $FF40 bit 5 (DECB double-density / NMI gate) */
++	int drq;
++	int intrq;
++	int writing;
++	unsigned buf_i;
++	unsigned buf_n;
++	uint8_t buf[SDC_BLOCK_SIZE];
++};
++
++static inline void sdc_fdc_reset(struct sdc_fdc *f) {
++	memset(f, 0, sizeof(*f));
++	f->sector = 1;
++}
++
++static inline int sdc_fdc_want_halt(const struct sdc_fdc *f) {
++	/* Never HALT while a sector is in flight.  DECB writes halt-enable
++	 * after each DATREG access; if DRQ were clear the CPU would freeze
++	 * and NMI (checked only when !HALT) would never run. */
++	if (f->buf_n != 0) {
++		return 0;
++	}
++	return f->halt_enable && !f->intrq && !f->drq;
++}
++
++static inline int sdc_fdc_want_nmi(const struct sdc_fdc *f) {
++	/* Real CoCo FDC gates INTRQ→NMI with $FF40 bit 5 (MAME coco_fdc,
++	 * DECB ORA #$20).  Ungated NMI on Type II NOTREADY is taken before
++	 * DECB's DRQ poll times out; ANDA #$7C then hides bit 7 and DIR
++	 * "succeeds" with an empty buffer (?NE, not ?IO). */
++	return f->intrq && f->nmi_enable;
++}
++
++static inline void sdc_fdc_set_intrq(struct sdc_fdc *f, int on) {
++	f->intrq = on ? 1 : 0;
++	if (on) {
++		f->halt_enable = 0;
++		f->drq = 0;
++	}
++}
++
++static inline uint8_t sdc_fdc_idle_status(struct sdc_fs *fs, struct sdc_fdc *f) {
++	uint8_t st = 0;
++	if (f->track == 0) {
++		st |= SDC_FLP_TRACK0;
++	}
++	if (!sdc_fs_fdc_ready(fs, f->drive)) {
++		st |= SDC_FLP_NOTREADY;
++	} else if (sdc_fs_fdc_wp(fs, f->drive)) {
++		st |= SDC_FLP_WP;
++	}
++	return st;
++}
++
++static inline void sdc_fdc_finish(struct sdc_fdc *f, uint8_t status) {
++	f->writing = 0;
++	f->buf_i = 0;
++	f->buf_n = 0;
++	f->drq = 0;
++	f->status = status;
++	sdc_fdc_set_intrq(f, 1);
++}
++
++static inline void sdc_fdc_start_drq(struct sdc_fdc *f, int writing) {
++	f->writing = writing ? 1 : 0;
++	f->buf_i = 0;
++	f->drq = 1;
++	f->intrq = 0;
++	f->status = (uint8_t)(SDC_FLP_BUSY | SDC_FLP_DRQ);
++}
++
++void sdc_fdc_command(struct sdc_fdc *f, struct sdc_fs *fs, uint8_t cmd);
++uint8_t sdc_fdc_read(struct sdc_fdc *f, struct sdc_fs *fs, int reg);
++void sdc_fdc_write(struct sdc_fdc *f, struct sdc_fs *fs, int reg, uint8_t D);
++
++#endif
+diff --git a/src/cocosdc_fs.c b/src/cocosdc_fs.c
+new file mode 100644
+index 00000000..9725b387
+--- /dev/null
++++ b/src/cocosdc_fs.c
+@@ -0,0 +1,1576 @@
++/** \file
++ *
++ *  \brief CoCoSDC host-folder filesystem (Phase D).
++ *
++ *  Command strings and 256-byte record layouts follow Studio's
++ *  SDC_FileAccess.asm and the CoCo SDC User Guide (Darren Atkinson)
++ *  opcode/block dictionary.  Stream ($90/$91) follows SDC_BigLoadm.asm
++ *  / SDC_StreamFile_Library.asm / SDC_Play.asm: 512-byte sectors, LSN×512,
++ *  abort $D0 (completed in sdc_hw_write so Play BREAK need not poll).
++ *
++ *  \licenseblock This file is part of XRoar, a Dragon/Tandy CoCo emulator.
++ *
++ *  XRoar is free software; you can redistribute it and/or modify it under the
++ *  terms of the GNU General Public License as published by the Free Software
++ *  Foundation, either version 3 of the License, or (at your option) any later
++ *  version.
++ *
++ *  See COPYING.GPL for redistribution conditions.
++ *
++ *  \endlicenseblock
++ */
++
++#ifndef _DEFAULT_SOURCE
++#define _DEFAULT_SOURCE
++#endif
++
++#include "top-config.h"
++
++#include <ctype.h>
++#include <dirent.h>
++#include <errno.h>
++#include <limits.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <strings.h>
++#include <sys/stat.h>
++#include <unistd.h>
++
++#include "cocosdc_fs.h"
++
++#ifndef PATH_MAX
++#define PATH_MAX 4096
++#endif
++
++#define SDC_PATH_MAX 254
++
++static char *sdc_strdup(const char *s) {
++	size_t n = strlen(s) + 1;
++	char *p = malloc(n);
++	if (p) {
++		memcpy(p, s, n);
++	}
++	return p;
++}
++
++static void slot_close(struct sdc_slot *s) {
++	if (s->fp) {
++		fclose(s->fp);
++		s->fp = NULL;
++	}
++	free(s->host_path);
++	s->host_path = NULL;
++	s->writable = 0;
++	s->attr = 0;
++	s->fdc_ok = 0;
++	s->type = SDC_DTYPE_RAW;
++	s->header = 0;
++	s->spt = SDC_FLOPPY_SPT;
++	s->sides = 1;
++	s->fdc_sectors = 0;
++	memset(s->name, ' ', 8);
++	memset(s->ext, ' ', 3);
++}
++
++static void listing_clear(struct sdc_fs *fs) {
++	free(fs->dirents);
++	fs->dirents = NULL;
++	fs->ndirents = 0;
++	fs->dir_cap = 0;
++	fs->dir_index = 0;
++	fs->listing_active = 0;
++}
++
++void sdc_fs_init(struct sdc_fs *fs) {
++	memset(fs, 0, sizeof(*fs));
++	fs->cwd_rel = sdc_strdup("");
++}
++
++void sdc_fs_free(struct sdc_fs *fs) {
++	sdc_fs_reset(fs);
++	free(fs->root);
++	fs->root = NULL;
++	free(fs->cwd_rel);
++	fs->cwd_rel = NULL;
++}
++
++void sdc_fs_reset(struct sdc_fs *fs) {
++	for (int i = 0; i < SDC_SLOTS; i++) {
++		slot_close(&fs->slot[i]);
++	}
++	listing_clear(fs);
++	free(fs->cwd_rel);
++	fs->cwd_rel = sdc_strdup("");
++	fs->stream_off = 0;
++	fs->stream_end = 0;
++}
++
++static void strip_slash(char *s) {
++	size_t n = strlen(s);
++	while (n > 1 && s[n - 1] == '/') {
++		s[--n] = 0;
++	}
++}
++
++const char *sdc_fs_err_name(int err) {
++	if (err == 0) {
++		return "ok";
++	}
++	if (err == 1) {
++		return "no STARTUP.CFG";
++	}
++	if (err & SDC_ERR_NOTFOUND) {
++		return "not found";
++	}
++	if (err & SDC_ERR_INUSE) {
++		return "in use";
++	}
++	if (err & SDC_ERR_INVALID) {
++		return "invalid image/path";
++	}
++	if (err & SDC_ERR_MISC) {
++		return "open/io failed";
++	}
++	return "error";
++}
++
++int sdc_fs_set_root(struct sdc_fs *fs, const char *host_root) {
++	sdc_fs_reset(fs);
++	free(fs->root);
++	fs->root = NULL;
++	if (!host_root || !host_root[0]) {
++		return -1;
++	}
++	fs->root = sdc_strdup(host_root);
++	if (!fs->root) {
++		return -1;
++	}
++	strip_slash(fs->root);
++
++	struct stat st;
++	if (stat(fs->root, &st) != 0 || !S_ISDIR(st.st_mode)) {
++		return -1;
++	}
++	(void)sdc_fs_apply_startup(fs);
++	return 0;
++}
++
++/* - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - */
++
++static int join2(char *dst, size_t dstsz, const char *a, const char *b) {
++	int n;
++	if (!b || !b[0]) {
++		n = snprintf(dst, dstsz, "%s", a ? a : "");
++	} else if (!a || !a[0]) {
++		n = snprintf(dst, dstsz, "%s", b);
++	} else if (a[strlen(a) - 1] == '/') {
++		n = snprintf(dst, dstsz, "%s%s", a, b);
++	} else {
++		n = snprintf(dst, dstsz, "%s/%s", a, b);
++	}
++	return (n < 0 || (size_t)n >= dstsz) ? -1 : 0;
++}
++
++static int under_root(const char *root, const char *path) {
++	size_t n;
++	if (!root || !root[0] || !path) {
++		return 0;
++	}
++	n = strlen(root);
++	if (strncmp(path, root, n) != 0) {
++		return 0;
++	}
++	return path[n] == 0 || path[n] == '/';
++}
++
++/* FAT-style 8.3 in 11 bytes (spaces).  pattern: '*' -> rest of field '?'. */
++static void to_fat11(const char *name, char fat[11], int pattern) {
++	int in_ext = 0;
++	int ni = 0;
++	int ei = 0;
++	const char *base = strrchr(name, '/');
++	base = base ? base + 1 : name;
++	memset(fat, ' ', 11);
++	for (; *base; base++) {
++		unsigned char c = (unsigned char)*base;
++		if (c == '.' && !in_ext) {
++			in_ext = 1;
++			continue;
++		}
++		if (pattern && c == '*') {
++			if (in_ext) {
++				while (ei < 3) {
++					fat[8 + ei++] = '?';
++				}
++			} else {
++				while (ni < 8) {
++					fat[ni++] = '?';
++				}
++			}
++			continue;
++		}
++		if (!(pattern && c == '?')) {
++			c = (unsigned char)toupper(c);
++		}
++		if (in_ext) {
++			if (ei < 3) {
++				fat[8 + ei++] = (char)c;
++			}
++		} else if (ni < 8) {
++			fat[ni++] = (char)c;
++		}
++	}
++}
++
++static int fat11_match(const char *pat, const char *name) {
++	for (int i = 0; i < 11; i++) {
++		if (pat[i] == '?') {
++			continue;
++		}
++		if (pat[i] != name[i]) {
++			return 0;
++		}
++	}
++	return 1;
++}
++
++static int is_wild(const char *s) {
++	return strchr(s, '*') || strchr(s, '?');
++}
++
++static int match_wild(const char *pat, const char *host) {
++	char p[11], n[11];
++	if (strcmp(pat, "*") == 0 || strcmp(pat, "*.*") == 0) {
++		return 1;
++	}
++	to_fat11(pat, p, 1);
++	to_fat11(host, n, 0);
++	return fat11_match(p, n);
++}
++
++static int name_eq(const char *req, const char *host) {
++	char a[11], b[11];
++	if (strcasecmp(req, host) == 0) {
++		return 1;
++	}
++	to_fat11(req, a, 0);
++	to_fat11(host, b, 0);
++	return memcmp(a, b, 11) == 0;
++}
++
++static int name_stem_eq(const char *req, const char *host) {
++	char a[11], b[11];
++	to_fat11(req, a, 0);
++	to_fat11(host, b, 0);
++	return memcmp(a, b, 8) == 0;
++}
++
++static int lookup_child(const char *parent, const char *name, int allow_wild,
++			char *out, size_t outsz) {
++	DIR *d;
++	struct dirent *de;
++	struct stat st;
++	int found = 0;
++
++	if (strcmp(name, ".") == 0) {
++		return join2(out, outsz, parent, "");
++	}
++	if (strcmp(name, "..") == 0) {
++		char *slash;
++		if (join2(out, outsz, parent, "") != 0) {
++			return -1;
++		}
++		slash = strrchr(out, '/');
++		if (!slash) {
++			return -1;
++		}
++		if (slash == out) {
++			slash[1] = 0;
++		} else {
++			*slash = 0;
++		}
++		return 0;
++	}
++
++	if (!allow_wild && !is_wild(name)) {
++		if (join2(out, outsz, parent, name) != 0) {
++			return -1;
++		}
++		if (stat(out, &st) == 0) {
++			return 0;
++		}
++	}
++
++	d = opendir(parent);
++	if (!d) {
++		return -1;
++	}
++	while ((de = readdir(d)) != NULL) {
++		int match;
++		if (de->d_name[0] == '.' &&
++		    (de->d_name[1] == 0 || (de->d_name[1] == '.' && de->d_name[2] == 0))) {
++			continue;
++		}
++		if (allow_wild && is_wild(name)) {
++			match = match_wild(name, de->d_name);
++		} else {
++			match = name_eq(name, de->d_name);
++		}
++		if (match) {
++			if (join2(out, outsz, parent, de->d_name) == 0) {
++				found = 1;
++			}
++			break;
++		}
++	}
++	if (!found && !allow_wild && !strchr(name, '.')) {
++		rewinddir(d);
++		while ((de = readdir(d)) != NULL) {
++			if (de->d_name[0] == '.' &&
++			    (de->d_name[1] == 0 || (de->d_name[1] == '.' && de->d_name[2] == 0))) {
++				continue;
++			}
++			if (name_stem_eq(name, de->d_name)) {
++				if (join2(out, outsz, parent, de->d_name) == 0) {
++					found = 1;
++				}
++				break;
++			}
++		}
++	}
++	closedir(d);
++	return found ? 0 : -1;
++}
++
++enum {
++	R_MUST_EXIST = 1 << 0,
++	R_MUST_DIR   = 1 << 1,
++	R_CREATE     = 1 << 2,
++	R_WILD_LEAF  = 1 << 3,
++	R_LIST       = 1 << 4
++};
++
++struct resolved {
++	char host[PATH_MAX];
++	char parent[PATH_MAX];
++	char leaf[SDC_PATH_MAX];
++	int exists;
++	int is_dir;
++};
++
++static int start_dir(const struct sdc_fs *fs, const char *sdc_path, char *cur, size_t cursz) {
++	if (!fs->root) {
++		return -1;
++	}
++	if (sdc_path && sdc_path[0] == '/') {
++		return join2(cur, cursz, fs->root, "");
++	}
++	return join2(cur, cursz, fs->root, fs->cwd_rel ? fs->cwd_rel : "");
++}
++
++static int resolve_path(const struct sdc_fs *fs, const char *sdc_path, unsigned flags,
++			struct resolved *r) {
++	char copy[SDC_PATH_MAX + 1];
++	char cur[PATH_MAX];
++	char *p;
++	char *parts[64];
++	int nparts = 0;
++	int i;
++	struct stat st;
++
++	memset(r, 0, sizeof(*r));
++	if (!fs->root) {
++		return SDC_ERR_MISC;
++	}
++	if (start_dir(fs, sdc_path, cur, sizeof(cur)) != 0) {
++		return SDC_ERR_INVALID;
++	}
++	if (!under_root(fs->root, cur)) {
++		return SDC_ERR_INVALID;
++	}
++
++	if (!sdc_path) {
++		sdc_path = "";
++	}
++	while (*sdc_path == '/') {
++		sdc_path++;
++	}
++	if (strlen(sdc_path) > SDC_PATH_MAX) {
++		return SDC_ERR_INVALID;
++	}
++	memcpy(copy, sdc_path, strlen(sdc_path) + 1);
++
++	p = copy;
++	while (*p) {
++		char *start;
++		while (*p == '/') {
++			p++;
++		}
++		if (*p == 0) {
++			break;
++		}
++		start = p;
++		while (*p && *p != '/') {
++			p++;
++		}
++		if (*p) {
++			*p++ = 0;
++		}
++		if (start[0] == 0) {
++			return SDC_ERR_INVALID;
++		}
++		if (nparts >= 64) {
++			return SDC_ERR_INVALID;
++		}
++		parts[nparts++] = start;
++	}
++
++	if (join2(r->parent, sizeof(r->parent), cur, "") != 0) {
++		return SDC_ERR_INVALID;
++	}
++
++	for (i = 0; i < nparts; i++) {
++		int last = (i == nparts - 1);
++		int wild = last && (flags & R_WILD_LEAF);
++		char next[PATH_MAX];
++
++		if (last) {
++			snprintf(r->leaf, sizeof(r->leaf), "%s", parts[i]);
++			if (join2(r->parent, sizeof(r->parent), cur, "") != 0) {
++				return SDC_ERR_INVALID;
++			}
++			/* Directory listing: wildcard leaf stays on the parent dir. */
++			if ((flags & R_LIST) && is_wild(parts[i])) {
++				if (join2(r->host, sizeof(r->host), cur, "") != 0) {
++					return SDC_ERR_INVALID;
++				}
++				r->exists = 1;
++				r->is_dir = 1;
++				return 0;
++			}
++		}
++
++		if (lookup_child(cur, parts[i], wild, next, sizeof(next)) != 0) {
++			if (last && (flags & R_CREATE) && !is_wild(parts[i])) {
++				if (join2(next, sizeof(next), cur, parts[i]) != 0) {
++					return SDC_ERR_INVALID;
++				}
++				if (!under_root(fs->root, next)) {
++					return SDC_ERR_INVALID;
++				}
++				if (join2(r->host, sizeof(r->host), next, "") != 0) {
++					return SDC_ERR_INVALID;
++				}
++				r->exists = 0;
++				r->is_dir = 0;
++				return 0;
++			}
++			return SDC_ERR_NOTFOUND;
++		}
++		if (!under_root(fs->root, next)) {
++			return SDC_ERR_INVALID;
++		}
++		if (join2(cur, sizeof(cur), next, "") != 0) {
++			return SDC_ERR_INVALID;
++		}
++		if (!last) {
++			if (stat(cur, &st) != 0 || !S_ISDIR(st.st_mode)) {
++				return SDC_ERR_NOTFOUND;
++			}
++		}
++	}
++
++	if (join2(r->host, sizeof(r->host), cur, "") != 0) {
++		return SDC_ERR_INVALID;
++	}
++	if (nparts == 0) {
++		r->leaf[0] = 0;
++		if (join2(r->parent, sizeof(r->parent), cur, "") != 0) {
++			return SDC_ERR_INVALID;
++		}
++	}
++
++	if (stat(r->host, &st) == 0) {
++		r->exists = 1;
++		r->is_dir = S_ISDIR(st.st_mode) ? 1 : 0;
++	} else {
++		r->exists = 0;
++		r->is_dir = 0;
++		if (flags & R_MUST_EXIST) {
++			return SDC_ERR_NOTFOUND;
++		}
++	}
++	if ((flags & R_MUST_DIR) && (!r->exists || !r->is_dir)) {
++		return SDC_ERR_NOTFOUND;
++	}
++	return 0;
++}
++
++static int cwd_host(const struct sdc_fs *fs, char *out, size_t outsz) {
++	return join2(out, outsz, fs->root, fs->cwd_rel ? fs->cwd_rel : "");
++}
++
++static int set_cwd_from_host(struct sdc_fs *fs, const char *host) {
++	size_t n;
++	if (!under_root(fs->root, host)) {
++		return SDC_ERR_INVALID;
++	}
++	n = strlen(fs->root);
++	free(fs->cwd_rel);
++	if (host[n] == 0) {
++		fs->cwd_rel = sdc_strdup("");
++	} else {
++		fs->cwd_rel = sdc_strdup(host + n + (host[n] == '/' ? 1 : 0));
++	}
++	return fs->cwd_rel ? 0 : SDC_ERR_MISC;
++}
++
++/* - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - */
++
++static uint32_t file_size_path(const char *path) {
++	struct stat st;
++	if (stat(path, &st) != 0 || st.st_size < 0) {
++		return 0;
++	}
++	if ((unsigned long long)st.st_size > 0xffffffffull) {
++		return 0xffffffffu;
++	}
++	return (uint32_t)st.st_size;
++}
++
++static uint32_t slot_size(struct sdc_slot *s) {
++	long pos, end;
++	if (!s->fp) {
++		return s->host_path ? file_size_path(s->host_path) : 0;
++	}
++	pos = ftell(s->fp);
++	if (pos < 0) {
++		return s->host_path ? file_size_path(s->host_path) : 0;
++	}
++	if (fseek(s->fp, 0, SEEK_END) != 0) {
++		return 0;
++	}
++	end = ftell(s->fp);
++	(void)fseek(s->fp, pos, SEEK_SET);
++	if (end < 0) {
++		return 0;
++	}
++	if (end > 0x7fffffffL) {
++		return 0xffffffffu;
++	}
++	return (uint32_t)end;
++}
++
++static void fat83_into(const char *name, char n[8], char e[3]) {
++	char fat[11];
++	to_fat11(name, fat, 0);
++	memcpy(n, fat, 8);
++	memcpy(e, fat + 8, 3);
++}
++
++static uint8_t attr_for_path(const char *path, int is_dir) {
++	uint8_t a = 0;
++	if (is_dir) {
++		a |= SDC_ATTR_DIR;
++	}
++	if (access(path, W_OK) != 0) {
++		a |= SDC_ATTR_LOCKED;
++	}
++	return a;
++}
++
++static void slot_fill_meta(struct sdc_slot *s) {
++	const char *base;
++	if (!s->host_path) {
++		return;
++	}
++	base = strrchr(s->host_path, '/');
++	base = base ? base + 1 : s->host_path;
++	fat83_into(base, s->name, s->ext);
++	s->attr = attr_for_path(s->host_path, 0);
++}
++
++static int slot_ensure(struct sdc_slot *s) {
++	if (s->fp) {
++		return 0;
++	}
++	if (!s->host_path) {
++		return -1;
++	}
++	s->fp = fopen(s->host_path, "r+b");
++	if (s->fp) {
++		s->writable = 1;
++	} else {
++		s->fp = fopen(s->host_path, "rb");
++		s->writable = 0;
++	}
++	if (!s->fp) {
++		return -1;
++	}
++	slot_fill_meta(s);
++	return 0;
++}
++
++static int file_in_use(struct sdc_fs *fs, const char *host, int except_drive) {
++	struct stat st, o;
++	if (stat(host, &st) != 0) {
++		return 0;
++	}
++	for (int i = 0; i < SDC_SLOTS; i++) {
++		if (i == except_drive || !fs->slot[i].host_path) {
++			continue;
++		}
++		if (stat(fs->slot[i].host_path, &o) == 0 &&
++		    o.st_dev == st.st_dev && o.st_ino == st.st_ino) {
++			return 1;
++		}
++	}
++	return 0;
++}
++
++static void slot_apply_floppy_geom(struct sdc_slot *s, uint32_t payload,
++				   int sides_known, uint8_t sides) {
++	uint32_t sectors = payload / SDC_BLOCK_SIZE;
++
++	s->spt = SDC_FLOPPY_SPT;
++	if (sectors > SDC_FLOPPY_MAX_SEC) {
++		s->sides = 1;
++		s->fdc_sectors = 1440;
++		return;
++	}
++	if (sides_known && (sides == 1 || sides == 2)) {
++		s->sides = sides;
++	} else {
++		s->sides = (sectors > 720) ? 2 : 1;
++	}
++	s->fdc_sectors = sectors;
++}
++
++/* M:/N: disk image: JVC/VDK header and DECB-usable geometry.  m:/n: raw. */
++static int slot_probe_image(struct sdc_slot *s, int raw) {
++	uint8_t hdr[16];
++	uint32_t sz;
++	size_t n;
++	uint32_t header = 0;
++	uint8_t sides = 1;
++	int sides_known = 0;
++
++	s->fdc_ok = 0;
++	s->type = SDC_DTYPE_RAW;
++	s->header = 0;
++	s->spt = SDC_FLOPPY_SPT;
++	s->sides = 1;
++	s->fdc_sectors = 0;
++	if (raw) {
++		return 0;
++	}
++	if (!s->fp) {
++		return SDC_ERR_MISC;
++	}
++	sz = slot_size(s);
++	if (fseek(s->fp, 0, SEEK_SET) != 0) {
++		return SDC_ERR_MISC;
++	}
++	memset(hdr, 0, sizeof(hdr));
++	n = fread(hdr, 1, 12, s->fp);
++
++	if (sz >= 219262u && n >= 4 && memcmp(hdr, "SDF1", 4) == 0) {
++		return SDC_ERR_INVALID;
++	}
++
++	if (n >= 12 && hdr[0] == 'd' && hdr[1] == 'k') {
++		uint32_t hsz = (uint32_t)hdr[2] | ((uint32_t)hdr[3] << 8);
++		if (hsz < 12 || hsz > 256 || hsz > sz) {
++			return SDC_ERR_INVALID;
++		}
++		header = hsz;
++		sides = hdr[9];
++		sides_known = 1;
++		if (hdr[10] & 0x01) {
++			s->writable = 0;
++			s->attr |= SDC_ATTR_LOCKED;
++		}
++		s->type = SDC_DTYPE_VDK;
++	} else {
++		header = sz & 255u;
++		if (header == 0) {
++			if (sz < SDC_DSK_MIN_BYTES) {
++				return SDC_ERR_INVALID;
++			}
++			s->type = SDC_DTYPE_DSK;
++		} else if (header <= 4) {
++			if (n < header) {
++				return SDC_ERR_INVALID;
++			}
++			/* This controller exposes 18 sectors of 256 bytes per
++			 * track. Reject incompatible JVC geometry rather than
++			 * mounting it and silently addressing the wrong bytes. */
++			if (hdr[0] != SDC_FLOPPY_SPT ||
++			    (header >= 3 && hdr[2] != 1) ||
++			    (header >= 2 && hdr[1] != 1 && hdr[1] != 2)) {
++				return SDC_ERR_INVALID;
++			}
++			s->type = SDC_DTYPE_JVC;
++			/* JVC's omitted side-count byte defaults to one, even
++			 * when an 80-track image exceeds the raw-size heuristic. */
++			sides_known = 1;
++			if (header >= 2) {
++				sides = hdr[1];
++			}
++		} else {
++			return SDC_ERR_INVALID;
++		}
++	}
++
++	if (sz < header + SDC_BLOCK_SIZE) {
++		return SDC_ERR_INVALID;
++	}
++	s->header = header;
++	slot_apply_floppy_geom(s, sz - header, sides_known, sides);
++	s->fdc_ok = 1;
++	return 0;
++}
++
++static uint32_t adjust_lsn(const struct sdc_slot *s, uint32_t lsn, uint8_t cmd) {
++	uint16_t spt = s->spt ? s->spt : (uint16_t)SDC_FLOPPY_SPT;
++	if ((cmd & 0x02) && s->sides == 2 && spt) {
++		uint32_t trk = lsn / spt;
++		uint32_t sec = lsn % spt;
++		return trk * 2u * spt + sec;
++	}
++	return lsn;
++}
++
++static int chs_to_lsn(const struct sdc_slot *s, unsigned track, unsigned sector,
++		      unsigned side, uint32_t *out) {
++	unsigned sides = s->sides ? s->sides : 1u;
++	unsigned spt = s->spt ? s->spt : SDC_FLOPPY_SPT;
++	uint32_t lsn;
++
++	if (sector < 1 || sector > spt) {
++		return SDC_FDC_RNF;
++	}
++	if (side >= sides) {
++		if (sides == 1) {
++			side = 0;
++		} else {
++			return SDC_FDC_RNF;
++		}
++	}
++	lsn = (uint32_t)(track * sides + side) * spt + (sector - 1);
++	if (s->fdc_sectors && lsn >= s->fdc_sectors) {
++		return SDC_FDC_RNF;
++	}
++	*out = lsn;
++	return SDC_FDC_OK;
++}
++
++static uint32_t lsn_of(const struct sdc_hw *hw) {
++	return ((uint32_t)hw->latched_preg[0] << 16) |
++	       ((uint32_t)hw->latched_preg[1] << 8) | hw->latched_preg[2];
++}
++
++static int parse_cmd_string(const uint8_t *block, char *letter, char *path, size_t path_max) {
++	size_t i = 0;
++	if (block[0] == 0 || block[1] != ':') {
++		return -1;
++	}
++	*letter = (char)block[0];
++	while (i + 2 < SDC_BLOCK_SIZE && block[i + 2] != 0 && i + 1 < path_max) {
++		path[i] = (char)block[i + 2];
++		i++;
++	}
++	path[i] = 0;
++	return 0;
++}
++
++static void fill_info_record(uint8_t *b, const char n[8], const char e[3],
++			     uint8_t attr, uint32_t size) {
++	memset(b, 0, 32);
++	memcpy(b, n, 8);
++	memcpy(b + 8, e, 3);
++	b[11] = attr;
++	b[28] = (uint8_t)size;
++	b[29] = (uint8_t)(size >> 8);
++	b[30] = (uint8_t)(size >> 16);
++	b[31] = (uint8_t)(size >> 24);
++}
++
++static void fill_dir_record(uint8_t rec[16], const char *host_name, const char *host_path, int is_dir) {
++	char fat[11];
++	uint32_t sz = is_dir ? 0 : file_size_path(host_path);
++	to_fat11(host_name, fat, 0);
++	memset(rec, 0, 16);
++	memcpy(rec, fat, 11);
++	rec[11] = attr_for_path(host_path, is_dir);
++	rec[12] = (uint8_t)(sz >> 24);
++	rec[13] = (uint8_t)(sz >> 16);
++	rec[14] = (uint8_t)(sz >> 8);
++	rec[15] = (uint8_t)sz;
++}
++
++/* - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - */
++
++static void cmd_eject(struct sdc_fs *fs, struct sdc_hw *hw, unsigned drive) {
++	slot_close(&fs->slot[drive]);
++	if (hw) {
++		sdc_hw_succeed(hw);
++	}
++}
++
++/* letter M/m/N/n.  hw may be NULL (STARTUP.CFG).  Returns 0 or SDC_ERR_*. */
++static int fs_mount_path(struct sdc_fs *fs, unsigned drive, char letter,
++			 const char *path, struct sdc_hw *hw) {
++	struct resolved r;
++	unsigned flags = R_WILD_LEAF;
++	int create = (letter == 'n' || letter == 'N');
++	int raw = (letter == 'm' || letter == 'n');
++	int err;
++	struct sdc_slot *s;
++	FILE *fp;
++	int writable = 0;
++
++	if (drive >= SDC_SLOTS) {
++		return SDC_ERR_INVALID;
++	}
++	if (!path || path[0] == 0) {
++		if (letter == 'M' || letter == 'm') {
++			slot_close(&fs->slot[drive]);
++			return 0;
++		}
++		return SDC_ERR_INVALID;
++	}
++
++	if (create) {
++		flags = R_CREATE;
++	}
++
++	err = resolve_path(fs, path, flags, &r);
++	if (err) {
++		return err;
++	}
++	if (r.is_dir) {
++		return SDC_ERR_INVALID;
++	}
++
++	slot_close(&fs->slot[drive]);
++
++	if (r.exists && file_in_use(fs, r.host, (int)drive)) {
++		return SDC_ERR_INUSE;
++	}
++
++	if (!r.exists) {
++		if (!create) {
++			return SDC_ERR_NOTFOUND;
++		}
++		fp = fopen(r.host, "w+b");
++		if (!fp) {
++			return SDC_ERR_MISC;
++		}
++		if (letter == 'N' && hw && hw->latched_preg[0] == 0 &&
++		    hw->latched_preg[1] == 0 && hw->latched_preg[2] == 0) {
++			if (fseek(fp, 630L * SDC_BLOCK_SIZE - 1, SEEK_SET) != 0 ||
++			    fputc(0, fp) == EOF) {
++				fclose(fp);
++				return SDC_ERR_MISC;
++			}
++		}
++		writable = 1;
++	} else {
++		fp = fopen(r.host, "r+b");
++		if (fp) {
++			writable = 1;
++		} else {
++			fp = fopen(r.host, "rb");
++			writable = 0;
++		}
++		if (!fp) {
++			return SDC_ERR_MISC;
++		}
++		if (!writable && (letter == 'n' || letter == 'N')) {
++			fclose(fp);
++			return SDC_ERR_MISC;
++		}
++	}
++
++	s = &fs->slot[drive];
++	s->fp = fp;
++	s->writable = writable;
++	s->host_path = sdc_strdup(r.host);
++	if (!s->host_path) {
++		slot_close(s);
++		return SDC_ERR_MISC;
++	}
++	slot_fill_meta(s);
++	err = slot_probe_image(s, raw);
++	if (err) {
++		slot_close(s);
++		return err;
++	}
++	return 0;
++}
++
++static void cmd_mount(struct sdc_fs *fs, struct sdc_hw *hw, unsigned drive,
++		      char letter, const char *path) {
++	int err;
++
++	if (path[0] == 0 && (letter == 'M' || letter == 'm')) {
++		cmd_eject(fs, hw, drive);
++		return;
++	}
++	err = fs_mount_path(fs, drive, letter, path, hw);
++	if (err) {
++		sdc_hw_fail(hw, (uint8_t)err);
++		return;
++	}
++	sdc_hw_succeed(hw);
++}
++
++static int fs_set_cwd(struct sdc_fs *fs, const char *path) {
++	struct resolved r;
++	int err;
++	const char *p = (path && path[0]) ? path : "/";
++	err = resolve_path(fs, p, R_MUST_EXIST | R_MUST_DIR, &r);
++	if (err) {
++		return err;
++	}
++	return set_cwd_from_host(fs, r.host);
++}
++
++static void cmd_set_cwd(struct sdc_fs *fs, struct sdc_hw *hw, const char *path) {
++	int err = fs_set_cwd(fs, path);
++	if (err) {
++		sdc_hw_fail(hw, (uint8_t)err);
++		return;
++	}
++	sdc_hw_succeed(hw);
++}
++
++static int dirents_push(struct sdc_fs *fs, const uint8_t rec[16]) {
++	struct sdc_dir_rec *n;
++	if (fs->ndirents >= fs->dir_cap) {
++		unsigned cap = fs->dir_cap ? fs->dir_cap * 2 : 16;
++		n = realloc(fs->dirents, cap * sizeof(*n));
++		if (!n) {
++			return -1;
++		}
++		fs->dirents = n;
++		fs->dir_cap = cap;
++	}
++	memcpy(fs->dirents[fs->ndirents].rec, rec, 16);
++	fs->ndirents++;
++	return 0;
++}
++
++static void cmd_init_dir(struct sdc_fs *fs, struct sdc_hw *hw, const char *path) {
++	struct resolved r;
++	char dirpath[PATH_MAX];
++	char pattern[SDC_PATH_MAX];
++	DIR *d;
++	struct dirent *de;
++	unsigned flags;
++	int err;
++
++	listing_clear(fs);
++
++	snprintf(pattern, sizeof(pattern), "*.*");
++	if (!path[0] || strcmp(path, "*") == 0 || strcmp(path, "*.*") == 0) {
++		if (cwd_host(fs, dirpath, sizeof(dirpath)) != 0) {
++			sdc_hw_fail(hw, SDC_ERR_MISC);
++			return;
++		}
++	} else {
++		int wild = is_wild(path) || is_wild(strrchr(path, '/') ? strrchr(path, '/') + 1 : path);
++		flags = wild ? (R_LIST | R_WILD_LEAF) : (R_MUST_EXIST);
++		err = resolve_path(fs, path, flags, &r);
++		if (err) {
++			sdc_hw_fail(hw, (uint8_t)err);
++			return;
++		}
++		if (r.is_dir) {
++			if (join2(dirpath, sizeof(dirpath), r.host, "") != 0) {
++				sdc_hw_fail(hw, SDC_ERR_INVALID);
++				return;
++			}
++		} else {
++			if (join2(dirpath, sizeof(dirpath), r.parent, "") != 0) {
++				sdc_hw_fail(hw, SDC_ERR_INVALID);
++				return;
++			}
++			snprintf(pattern, sizeof(pattern), "%s", r.leaf[0] ? r.leaf : "*.*");
++		}
++		if (wild && r.leaf[0]) {
++			snprintf(pattern, sizeof(pattern), "%s", r.leaf);
++		}
++	}
++
++	d = opendir(dirpath);
++	if (!d) {
++		sdc_hw_fail(hw, SDC_ERR_NOTFOUND);
++		return;
++	}
++	while ((de = readdir(d)) != NULL) {
++		char full[PATH_MAX];
++		struct stat st;
++		uint8_t rec[16];
++		int is_dir;
++		if (de->d_name[0] == '.' &&
++		    (de->d_name[1] == 0 || (de->d_name[1] == '.' && de->d_name[2] == 0))) {
++			continue;
++		}
++		if (!match_wild(pattern, de->d_name)) {
++			continue;
++		}
++		if (join2(full, sizeof(full), dirpath, de->d_name) != 0) {
++			continue;
++		}
++		if (stat(full, &st) != 0) {
++			continue;
++		}
++		is_dir = S_ISDIR(st.st_mode) ? 1 : 0;
++		if (!is_dir && !S_ISREG(st.st_mode)) {
++			continue;
++		}
++		fill_dir_record(rec, de->d_name, full, is_dir);
++		if (dirents_push(fs, rec) != 0) {
++			closedir(d);
++			listing_clear(fs);
++			sdc_hw_fail(hw, SDC_ERR_MISC);
++			return;
++		}
++	}
++	closedir(d);
++	fs->listing_active = 1;
++	fs->dir_index = 0;
++	sdc_hw_succeed(hw);
++}
++
++static void cmd_mkdir(struct sdc_fs *fs, struct sdc_hw *hw, const char *path) {
++	struct resolved r;
++	int err;
++	if (!path[0]) {
++		sdc_hw_fail(hw, SDC_ERR_INVALID);
++		return;
++	}
++	err = resolve_path(fs, path, R_CREATE, &r);
++	if (err) {
++		sdc_hw_fail(hw, (uint8_t)err);
++		return;
++	}
++	if (r.exists) {
++		sdc_hw_fail(hw, SDC_ERR_INUSE);
++		return;
++	}
++	if (mkdir(r.host, 0755) != 0) {
++		sdc_hw_fail(hw, errno == ENOENT ? SDC_ERR_NOTFOUND : SDC_ERR_MISC);
++		return;
++	}
++	sdc_hw_succeed(hw);
++}
++
++static void cmd_delete(struct sdc_fs *fs, struct sdc_hw *hw, const char *path) {
++	struct resolved r;
++	int err;
++	if (!path[0]) {
++		sdc_hw_fail(hw, SDC_ERR_INVALID);
++		return;
++	}
++	err = resolve_path(fs, path, R_MUST_EXIST, &r);
++	if (err) {
++		sdc_hw_fail(hw, (uint8_t)err);
++		return;
++	}
++	if (file_in_use(fs, r.host, -1)) {
++		sdc_hw_fail(hw, SDC_ERR_INUSE);
++		return;
++	}
++	if (r.is_dir) {
++		if (rmdir(r.host) != 0) {
++			sdc_hw_fail(hw, SDC_ERR_MISC);
++			return;
++		}
++	} else if (unlink(r.host) != 0) {
++		sdc_hw_fail(hw, SDC_ERR_MISC);
++		return;
++	}
++	sdc_hw_succeed(hw);
++}
++
++static void cmd_extd(struct sdc_fs *fs, struct sdc_hw *hw, unsigned drive) {
++	char letter;
++	char path[SDC_PATH_MAX];
++
++	if (parse_cmd_string(hw->block, &letter, path, sizeof(path)) != 0) {
++		sdc_hw_fail(hw, SDC_ERR_INVALID);
++		return;
++	}
++	switch (letter) {
++	case 'M':
++	case 'm':
++	case 'N':
++	case 'n':
++		cmd_mount(fs, hw, drive, letter, path);
++		break;
++	case 'D':
++		cmd_set_cwd(fs, hw, path);
++		break;
++	case 'L':
++		cmd_init_dir(fs, hw, path);
++		break;
++	case 'K':
++		cmd_mkdir(fs, hw, path);
++		break;
++	case 'X':
++		cmd_delete(fs, hw, path);
++		break;
++	default:
++		sdc_hw_fail(hw, SDC_ERR_INVALID);
++		break;
++	}
++}
++
++static void cmd_info(struct sdc_fs *fs, struct sdc_hw *hw, unsigned drive) {
++	struct sdc_slot *s = &fs->slot[drive];
++	memset(hw->block, 0, SDC_BLOCK_SIZE);
++	if (slot_ensure(s) != 0) {
++		sdc_hw_fail(hw, SDC_ERR_NOTFOUND);
++		return;
++	}
++	fill_info_record(hw->block, s->name, s->ext, s->attr, slot_size(s));
++	sdc_hw_start_rx(hw);
++}
++
++static void cmd_query(struct sdc_fs *fs, struct sdc_hw *hw, unsigned drive) {
++	struct sdc_slot *s = &fs->slot[drive];
++	uint32_t sz, sectors;
++	if (slot_ensure(s) != 0) {
++		sdc_hw_fail(hw, SDC_ERR_NOTFOUND);
++		return;
++	}
++	sz = slot_size(s);
++	if (s->header && sz > s->header) {
++		sz -= s->header;
++	}
++	sectors = (sz + (SDC_BLOCK_SIZE - 1)) / SDC_BLOCK_SIZE;
++	hw->preg[0] = (uint8_t)(sectors >> 16);
++	hw->preg[1] = (uint8_t)(sectors >> 8);
++	hw->preg[2] = (uint8_t)sectors;
++	sdc_hw_succeed(hw);
++}
++
++static void cmd_cwd(struct sdc_fs *fs, struct sdc_hw *hw) {
++	const char *leaf;
++	char n[8], e[3];
++	memset(hw->block, 0, SDC_BLOCK_SIZE);
++	if (!fs->root) {
++		sdc_hw_fail(hw, SDC_ERR_NOTFOUND);
++		return;
++	}
++	if (!fs->cwd_rel || !fs->cwd_rel[0]) {
++		/* Root: User Guide sets bits 4 and 7.  CommSDC treats bit 7 as
++		 * FAILED, so the 256-byte zero record is not transferred. */
++		sdc_hw_fail(hw, SDC_ERR_NOTFOUND);
++		return;
++	}
++	leaf = strrchr(fs->cwd_rel, '/');
++	leaf = leaf ? leaf + 1 : fs->cwd_rel;
++	fat83_into(leaf, n, e);
++	fill_info_record(hw->block, n, e, SDC_ATTR_DIR, 0);
++	sdc_hw_start_rx(hw);
++}
++
++static void cmd_dir_page(struct sdc_fs *fs, struct sdc_hw *hw) {
++	unsigned i;
++	memset(hw->block, 0, SDC_BLOCK_SIZE);
++	if (!fs->listing_active) {
++		sdc_hw_fail(hw, 0);
++		return;
++	}
++	for (i = 0; i < 16; i++) {
++		if (fs->dir_index >= fs->ndirents) {
++			break;
++		}
++		memcpy(hw->block + i * 16, fs->dirents[fs->dir_index].rec, 16);
++		fs->dir_index++;
++	}
++	sdc_hw_start_rx(hw);
++}
++
++static void cmd_ext(struct sdc_fs *fs, struct sdc_hw *hw, unsigned drive) {
++	switch (hw->preg[0]) {
++	case 'I':
++		cmd_info(fs, hw, drive);
++		break;
++	case '>':
++		cmd_dir_page(fs, hw);
++		break;
++	case 'C':
++		cmd_cwd(fs, hw);
++		break;
++	case 'Q':
++		cmd_query(fs, hw, drive);
++		break;
++	default:
++		sdc_hw_succeed(hw);
++		break;
++	}
++}
++
++static void cmd_read(struct sdc_fs *fs, struct sdc_hw *hw, unsigned drive) {
++	struct sdc_slot *s = &fs->slot[drive];
++	uint32_t lsn = adjust_lsn(s, lsn_of(hw), hw->cmd);
++	uint64_t off = (uint64_t)s->header + (uint64_t)lsn * SDC_BLOCK_SIZE;
++	uint32_t sz;
++	size_t n;
++
++	if (slot_ensure(s) != 0) {
++		sdc_hw_fail(hw, SDC_ERR_NOTFOUND);
++		return;
++	}
++	sz = slot_size(s);
++	if (off >= (uint64_t)sz) {
++		sdc_hw_fail(hw, 0);
++		return;
++	}
++	memset(hw->block, 0, SDC_BLOCK_SIZE);
++	if (fseek(s->fp, (long)off, SEEK_SET) != 0) {
++		sdc_hw_fail(hw, SDC_ERR_MISC);
++		return;
++	}
++	n = (size_t)(sz - (uint32_t)off);
++	if (n > SDC_BLOCK_SIZE) {
++		n = SDC_BLOCK_SIZE;
++	}
++	if (fread(hw->block, 1, n, s->fp) != n && ferror(s->fp)) {
++		sdc_hw_fail(hw, SDC_ERR_MISC);
++		return;
++	}
++	/* $8x bit 2 selects byte reads through $FF4B. Bit 1 is the
++	 * independent single-sided LSN flag already handled above. */
++	hw->stream_8bit = (hw->cmd & 0x04) != 0;
++	sdc_hw_start_rx(hw);
++}
++
++static void cmd_write(struct sdc_fs *fs, struct sdc_hw *hw, unsigned drive) {
++	struct sdc_slot *s = &fs->slot[drive];
++	uint32_t lsn = adjust_lsn(s, lsn_of(hw), hw->cmd);
++	uint64_t off = (uint64_t)s->header + (uint64_t)lsn * SDC_BLOCK_SIZE;
++
++	if (slot_ensure(s) != 0) {
++		sdc_hw_fail(hw, SDC_ERR_NOTFOUND);
++		return;
++	}
++	if (!s->writable) {
++		sdc_hw_fail(hw, 0);
++		return;
++	}
++	/* Mounted images have fixed geometry. Raw FileAccess mounts may grow
++	 * by appending logical blocks, but an invalid disk LSN must not resize
++	 * the image (and change how its geometry is inferred next time). */
++	if (s->type != SDC_DTYPE_RAW && off + SDC_BLOCK_SIZE > slot_size(s)) {
++		sdc_hw_fail(hw, 0);
++		return;
++	}
++	if (fseek(s->fp, (long)off, SEEK_SET) != 0) {
++		sdc_hw_fail(hw, SDC_ERR_MISC);
++		return;
++	}
++	if (fwrite(hw->block, 1, SDC_BLOCK_SIZE, s->fp) != SDC_BLOCK_SIZE) {
++		sdc_hw_fail(hw, SDC_ERR_MISC);
++		return;
++	}
++	if (fflush(s->fp) != 0 || fsync(fileno(s->fp)) != 0) {
++		sdc_hw_fail(hw, SDC_ERR_MISC);
++		return;
++	}
++	sdc_hw_succeed(hw);
++}
++
++static void stream_fill(struct sdc_fs *fs, struct sdc_hw *hw) {
++	struct sdc_slot *s = &fs->slot[hw->cmd & 0x01];
++	uint32_t remain;
++	size_t n;
++
++	if (slot_ensure(s) != 0) {
++		sdc_hw_fail(hw, SDC_ERR_NOTFOUND);
++		return;
++	}
++	if (fs->stream_off >= fs->stream_end) {
++		sdc_hw_succeed(hw);
++		return;
++	}
++	remain = fs->stream_end - fs->stream_off;
++	n = remain > SDC_STREAM_SIZE ? SDC_STREAM_SIZE : remain;
++	memset(hw->block, 0, SDC_STREAM_SIZE);
++	if (fseek(s->fp, (long)fs->stream_off, SEEK_SET) != 0) {
++		sdc_hw_fail(hw, SDC_ERR_MISC);
++		return;
++	}
++	if (fread(hw->block, 1, n, s->fp) != n && ferror(s->fp)) {
++		sdc_hw_fail(hw, SDC_ERR_MISC);
++		return;
++	}
++	fs->stream_off += (uint32_t)n;
++	sdc_hw_start_stream_rx(hw);
++}
++
++/* $90/$91 (16-bit $FF4A/$FF4B) or $92/$93 (8-bit $FF4B).  LSN is a 512-byte
++ * stream sector, not a 256-byte FileAccess LBN.  Refill uses hw->streaming
++ * so a new $90 (start_command clears it) restarts from the latched LSN. */
++static void cmd_stream(struct sdc_fs *fs, struct sdc_hw *hw) {
++	struct sdc_slot *s;
++	uint32_t lsn;
++	uint64_t off;
++	uint32_t sz;
++
++	if (hw->streaming) {
++		stream_fill(fs, hw);
++		return;
++	}
++
++	s = &fs->slot[hw->cmd & 0x01];
++	hw->stream_8bit = (hw->cmd & 0x02) != 0;
++	if (slot_ensure(s) != 0) {
++		sdc_hw_fail(hw, SDC_ERR_NOTFOUND);
++		return;
++	}
++	lsn = lsn_of(hw);
++	off = (uint64_t)lsn * (uint64_t)SDC_STREAM_SIZE;
++	sz = slot_size(s);
++	if (off >= (uint64_t)sz) {
++		sdc_hw_fail(hw, 0);
++		return;
++	}
++	fs->stream_off = (uint32_t)off;
++	fs->stream_end = sz;
++	stream_fill(fs, hw);
++}
++
++void sdc_fs_execute(struct sdc_fs *fs, struct sdc_hw *hw) {
++	unsigned family;
++	unsigned drive;
++
++	if (sdc_hw_take_builtin(hw)) {
++		return;
++	}
++	if (!hw->cmd_ready) {
++		return;
++	}
++
++	family = hw->cmd & 0xfe;
++	drive = hw->cmd & 0x01;
++
++	switch (family) {
++	case 0xc0:
++		cmd_ext(fs, hw, drive);
++		break;
++	case 0xe0:
++		cmd_extd(fs, hw, drive);
++		break;
++	case 0xa0:
++	case 0xa2: /* single-sided logical sector numbering */
++		cmd_write(fs, hw, drive);
++		break;
++	case 0x80:
++	case 0x82: /* single-sided logical sector numbering */
++	case 0x84: /* byte reads through $FF4B */
++	case 0x86: /* both flags */
++		cmd_read(fs, hw, drive);
++		break;
++	case 0x90:
++	case 0x92:
++		cmd_stream(fs, hw);
++		break;
++	case 0xd0:
++		/* Abort is handled in sdc_hw_write ($FF48=$D0).  Kept so a
++		 * cmd_ready $D0 (tests / older path) still cannot hang. */
++		sdc_hw_succeed(hw);
++		break;
++	default:
++		/* Never report successful I/O for an unsupported opcode. */
++		sdc_hw_fail(hw, SDC_ERR_INVALID);
++		break;
++	}
++}
++
++static char *trim_inplace(char *s) {
++	char *e;
++	while (*s == ' ' || *s == '\t' || *s == '\r' || *s == '\n') {
++		s++;
++	}
++	e = s + strlen(s);
++	while (e > s && (e[-1] == ' ' || e[-1] == '\t' || e[-1] == '\r' || e[-1] == '\n')) {
++		*--e = 0;
++	}
++	return s;
++}
++
++static char *strip_quotes(char *s) {
++	size_t n;
++	if (!s || s[0] == 0) {
++		return s;
++	}
++	n = strlen(s);
++	if (n >= 2 && ((s[0] == '"' && s[n - 1] == '"') || (s[0] == '\'' && s[n - 1] == '\''))) {
++		s[n - 1] = 0;
++		return s + 1;
++	}
++	return s;
++}
++
++int sdc_fs_apply_startup(struct sdc_fs *fs) {
++	char cfg[PATH_MAX];
++	char buf[512];
++	FILE *fp;
++	int first_err = 0;
++	int saw_cfg = 0;
++
++	if (!fs || !fs->root) {
++		return 1;
++	}
++	if (lookup_child(fs->root, "STARTUP.CFG", 0, cfg, sizeof(cfg)) != 0) {
++		return 1;
++	}
++	fp = fopen(cfg, "r");
++	if (!fp) {
++		return 1;
++	}
++	saw_cfg = 1;
++	while (fgets(buf, (int)sizeof(buf), fp) != NULL) {
++		char *p = trim_inplace(buf);
++		char key;
++		int err;
++		if (p[0] == (char)0xef && (unsigned char)p[1] == 0xbb &&
++		    (unsigned char)p[2] == 0xbf) {
++			p += 3;
++			p = trim_inplace(p);
++		}
++		if (p[0] == 0 || p[0] == '#' || p[0] == ';') {
++			continue;
++		}
++		key = (char)toupper((unsigned char)p[0]);
++		p++;
++		p = trim_inplace(p);
++		if (*p != '=') {
++			continue;
++		}
++		p++;
++		p = trim_inplace(p);
++		p = strip_quotes(p);
++		if (key == '0') {
++			err = fs_mount_path(fs, 0, 'M', p, NULL);
++			if (err && !first_err) {
++				first_err = err;
++			}
++		} else if (key == '1') {
++			err = fs_mount_path(fs, 1, 'M', p, NULL);
++			if (err && !first_err) {
++				first_err = err;
++			}
++		} else if (key == 'D') {
++			(void)fs_set_cwd(fs, p);
++		}
++	}
++	fclose(fp);
++	(void)saw_cfg;
++	return first_err;
++}
++
++int sdc_fs_fdc_ready(const struct sdc_fs *fs, unsigned drive) {
++	if (!fs || drive >= SDC_SLOTS) {
++		return 0;
++	}
++	return fs->slot[drive].fdc_ok && fs->slot[drive].host_path != NULL;
++}
++
++int sdc_fs_fdc_wp(const struct sdc_fs *fs, unsigned drive) {
++	if (!fs || drive >= SDC_SLOTS) {
++		return 1;
++	}
++	return !fs->slot[drive].writable;
++}
++
++static int fdc_xfer(struct sdc_fs *fs, unsigned drive, unsigned track,
++		    unsigned sector, unsigned side, uint8_t *buf, int wr) {
++	struct sdc_slot *s;
++	uint32_t lsn;
++	uint64_t off;
++	int rc;
++
++	if (!fs || drive >= SDC_SLOTS || !buf) {
++		return SDC_FDC_NOTREADY;
++	}
++	s = &fs->slot[drive];
++	if (!s->fdc_ok || slot_ensure(s) != 0) {
++		return SDC_FDC_NOTREADY;
++	}
++	if (wr && !s->writable) {
++		return SDC_FDC_WP;
++	}
++	rc = chs_to_lsn(s, track, sector, side, &lsn);
++	if (rc != SDC_FDC_OK) {
++		return rc;
++	}
++	off = (uint64_t)s->header + (uint64_t)lsn * SDC_BLOCK_SIZE;
++	if (fseek(s->fp, (long)off, SEEK_SET) != 0) {
++		return SDC_FDC_IO;
++	}
++	if (wr) {
++		if (fwrite(buf, 1, SDC_BLOCK_SIZE, s->fp) != SDC_BLOCK_SIZE) {
++			return SDC_FDC_IO;
++		}
++		if (fflush(s->fp) != 0 || fsync(fileno(s->fp)) != 0) {
++			return SDC_FDC_IO;
++		}
++	} else {
++		size_t n = fread(buf, 1, SDC_BLOCK_SIZE, s->fp);
++		if (n < SDC_BLOCK_SIZE) {
++			if (ferror(s->fp)) {
++				return SDC_FDC_IO;
++			}
++			memset(buf + n, 0, SDC_BLOCK_SIZE - n);
++			if (n == 0) {
++				return SDC_FDC_RNF;
++			}
++		}
++	}
++	return SDC_FDC_OK;
++}
++
++int sdc_fs_fdc_read(struct sdc_fs *fs, unsigned drive, unsigned track,
++		    unsigned sector, unsigned side, uint8_t *buf) {
++	return fdc_xfer(fs, drive, track, sector, side, buf, 0);
++}
++
++int sdc_fs_fdc_write(struct sdc_fs *fs, unsigned drive, unsigned track,
++		     unsigned sector, unsigned side, const uint8_t *buf) {
++	return fdc_xfer(fs, drive, track, sector, side, (uint8_t *)buf, 1);
++}
++
++void sdc_fs_flush(struct sdc_fs *fs) {
++	int i;
++
++	if (!fs) {
++		return;
++	}
++	for (i = 0; i < SDC_SLOTS; i++) {
++		if (fs->slot[i].fp) {
++			fflush(fs->slot[i].fp);
++			(void)fsync(fileno(fs->slot[i].fp));
++		}
++	}
++}
++
++int sdc_fs_mount_host(struct sdc_fs *fs, unsigned drive, const char *host_path) {
++	size_t n;
++	if (!fs || !fs->root || !host_path || !under_root(fs->root, host_path)) {
++		return SDC_ERR_INVALID;
++	}
++	n = strlen(fs->root);
++	if (host_path[n] != '/') {
++		return SDC_ERR_INVALID;  /* the root itself is not an image */
++	}
++	/* "/rest/of/path": absolute from the SD root, not the current dir. */
++	return fs_mount_path(fs, drive, 'M', host_path + n, NULL);
++}
+diff --git a/src/cocosdc_fs.h b/src/cocosdc_fs.h
+new file mode 100644
+index 00000000..d77d80ed
+--- /dev/null
++++ b/src/cocosdc_fs.h
+@@ -0,0 +1,126 @@
++/** \file
++ *
++ *  \brief CoCoSDC host-folder filesystem (Phase D + SDC-DOS floppy).
++ *
++ *  Maps Studio SDC_FileAccess.asm commands onto a directory given as
++ *  -sdc-root / sdc-root=:
++ *
++ *  - $E0/$E1  M:/m: mount, N:/n: create+mount, M: eject; also D:/L:/K:/X:
++ *  - $C0/$C1  'I' info, '>' dir page, 'C' CWD, 'V' version (builtin)
++ *  - $80-$87  read logical sector (bit 1: single-sided LSN; bit 2: byte port)
++ *  - $A0-$A3  write logical sector (bit 1: single-sided LSN)
++ *  - $90/$91  stream 512-byte sectors from LSN*512 until EOF or $D0
++ *             (Play / StreamFile / BIGLOADM; $D0 aborts in the register layer)
++ *
++ *  Uppercase M:/N: mount a floppy/hard-disk image (JVC/VDK header, FDC CHS).
++ *  Lowercase m:/n: are raw 256-byte blocks (FileAccess / stream; no FDC).
++ *
++ *  STARTUP.CFG in the volume root (0=FILE.DSK / 1=... / D=dir) is applied
++ *  when the root is set and on hard reset, matching the MCU auto-mount.
++ *
++ *  Paths are 8.3-ish, case-insensitive, relative to the SD CWD unless they
++ *  begin with '/'.  This is not a VCC SDC.dll port.
++ */
++
++#ifndef XROAR_COCOSDC_FS_H_
++#define XROAR_COCOSDC_FS_H_
++
++#include <stdio.h>
++#include <stdint.h>
++
++#include "cocosdc_hw.h"
++
++#define SDC_SLOTS 2
++
++#define SDC_ATTR_LOCKED (0x01)
++#define SDC_ATTR_HIDDEN (0x02)
++#define SDC_ATTR_SDF    (0x04)
++#define SDC_ATTR_DIR    (0x10)
++
++/* DSK images smaller than 18 tracks cannot hold the DECB directory track. */
++#define SDC_DSK_MIN_BYTES 82944u
++#define SDC_FLOPPY_SPT    18u
++#define SDC_FLOPPY_MAX_SEC 2880u
++
++#define SDC_FDC_OK       0
++#define SDC_FDC_NOTREADY 1
++#define SDC_FDC_RNF      2
++#define SDC_FDC_WP       3
++#define SDC_FDC_IO       4
++
++enum sdc_disk_type {
++	SDC_DTYPE_RAW = 0,
++	SDC_DTYPE_DSK,
++	SDC_DTYPE_JVC,
++	SDC_DTYPE_VDK
++};
++
++struct sdc_slot {
++	char *host_path;
++	char name[8];
++	char ext[3];
++	uint8_t attr;
++	int writable;
++	FILE *fp;
++	int fdc_ok;           /* M:/N: disk image; FDC CHS allowed */
++	enum sdc_disk_type type;
++	uint32_t header;      /* JVC/VDK header bytes before sector 0 */
++	uint16_t spt;         /* sectors per track (floppy = 18) */
++	uint8_t sides;        /* 1 or 2 */
++	uint32_t fdc_sectors; /* sectors visible to FDC (HDD capped at 1440) */
++};
++
++struct sdc_dir_rec {
++	uint8_t rec[16];
++};
++
++struct sdc_fs {
++	char *root;
++	char *cwd_rel; /* relative to root; "" = SD volume root */
++	struct sdc_slot slot[SDC_SLOTS];
++	struct sdc_dir_rec *dirents;
++	unsigned ndirents;
++	unsigned dir_cap;
++	unsigned dir_index;
++	int listing_active;
++	/* Stream ($90/$91): byte offset in the mounted file. */
++	uint32_t stream_off;
++	uint32_t stream_end;
++};
++
++void sdc_fs_init(struct sdc_fs *fs);
++void sdc_fs_free(struct sdc_fs *fs);
++/* Keep root; unmount, CWD back to volume root, drop listing. */
++void sdc_fs_reset(struct sdc_fs *fs);
++/* Copy and use host_root as the SD volume.  Returns 0 if it exists as a dir. */
++int sdc_fs_set_root(struct sdc_fs *fs, const char *host_root);
++
++/* Execute a command whose params (and optional TX block) are ready. */
++void sdc_fs_execute(struct sdc_fs *fs, struct sdc_hw *hw);
++
++/* MCU STARTUP.CFG: 0=/1= image path, D= current directory.
++ * Returns 0 if applied (or CFG had no 0=/1=), 1 if STARTUP.CFG is missing,
++ * or SDC_ERR_* if a 0=/1= disk-image mount failed. */
++int sdc_fs_apply_startup(struct sdc_fs *fs);
++
++/* Front-end hook (Android "Open with"): mount a host file that lies under
++ * the SD root as an M: disk image in drive 0 or 1, the same way STARTUP.CFG
++ * does.  Returns 0, or SDC_ERR_INVALID if host_path is outside the root. */
++int sdc_fs_mount_host(struct sdc_fs *fs, unsigned drive, const char *host_path);
++
++/* Human-readable SDC_ERR_* / apply_startup result for logs. */
++const char *sdc_fs_err_name(int err);
++
++/* FDC path: only M:/N: disk images, not m: raw mounts.
++ * CHS is 1-based sector (WD1773).  DECB DIR is track 17 sectors 3–11;
++ * the FAT is track 17 sector 2. */
++int sdc_fs_fdc_ready(const struct sdc_fs *fs, unsigned drive);
++int sdc_fs_fdc_wp(const struct sdc_fs *fs, unsigned drive);
++int sdc_fs_fdc_read(struct sdc_fs *fs, unsigned drive, unsigned track,
++		    unsigned sector, unsigned side, uint8_t *buf);
++int sdc_fs_fdc_write(struct sdc_fs *fs, unsigned drive, unsigned track,
++		     unsigned sector, unsigned side, const uint8_t *buf);
++/* fflush+fsync mounted M: FILE*s so DSKINI/SAVE are visible after exit. */
++void sdc_fs_flush(struct sdc_fs *fs);
++
++#endif
+diff --git a/src/cocosdc_hw.h b/src/cocosdc_hw.h
+new file mode 100644
+index 00000000..5f897433
+--- /dev/null
++++ b/src/cocosdc_hw.h
+@@ -0,0 +1,379 @@
++/** \file
++ *
++ *  \brief CoCoSDC SCS register protocol (CommSDC contract).
++ *
++ *  Address map from Studio's SDC_Comm.asm:
++ *
++ *  - $FF40 control latch (write $43 = command mode, $00 = leave)
++ *  - $FF48 command (write) / status (read)
++ *  - $FF49 param 1
++ *  - $FF4A param 2 / data A
++ *  - $FF4B param 3 / data B
++ *
++ *  Status bits: BUSY %00000001, READY %00000010, FAILED %10000000.
++ *
++ *  Any command with bit 5 set transfers a 256-byte block TO the controller
++ *  (READY then 256 writes to $FF4A/$FF4B).  The cart then succeeds, fails,
++ *  or (rarely) offers a response block.
++ *
++ *  Other commands set BUSY and cmd_ready so the cart can succeed with no
++ *  payload, fail, or offer a 256-byte response (READY, then 256 reads from
++ *  $FF4A/$FF4B) — Get Info / dir page / CWD / read LSN.
++ *
++ *  Stream ($90/$91, User Guide $9X) is not a CommSDC 256-byte exchange.
++ *  After the command, BUSY stays set and READY marks each 512-byte sector
++ *  on $FF4A/$FF4B until EOF (BUSY cleared) or abort ($D0).  BIGLOADM /
++ *  StreamFile poll READY for the first byte of every sector.
++ *
++ *  Play (SDC_Play.asm) uses the same stream: OpenSDC_File_X_At_Start
++ *  (m: mount + $90/$91, default drive 1), 16-bit LDU/LDX $FF4A, then
++ *  interleaved 512-byte loads while the previous buffer is "played".
++ *  After the first two READY waits, Play does *not* loop on READY before
++ *  the next 512 bytes — the last DATREG read of a sector must already
++ *  have presented the next sector (or cleared BUSY at EOF).  BREAK
++ *  writes $D0 to $FF48 and does not poll BUSY; CLR $FF40 at exit.
++ *
++ *  Extra FAILED bits used by SDC_FileAccess.asm:
++ *    $04 invalid path, $08 miscellaneous, $10 not found, $20 in use.
++ *
++ *  This header is intentionally free of XRoar types so the wait-loop
++ *  behaviour can be exercised from a tiny host-side test.
++ */
++
++#ifndef XROAR_COCOSDC_HW_H_
++#define XROAR_COCOSDC_HW_H_
++
++#include <stdbool.h>
++#include <stdint.h>
++#include <string.h>
++
++#define SDC_BUSY   (0x01)
++#define SDC_READY  (0x02)
++#define SDC_FAILED (0x80)
++
++#define SDC_ERR_INVALID  (0x04)
++#define SDC_ERR_MISC     (0x08)
++#define SDC_ERR_NOTFOUND (0x10)
++#define SDC_ERR_INUSE    (0x20)
++
++#define SDC_CMDMODE     (0x43)
++#define SDC_BLOCK_SIZE  (256)
++#define SDC_STREAM_SIZE (512)
++
++/* BCD 1.27 — Studio's CheckSDCFirmwareVersion requires >= $0127. */
++#define SDC_FW_VERSION_BCD (0x0127)
++
++enum sdc_xfer {
++	SDC_XFER_NONE = 0,
++	SDC_XFER_TX = 1,
++	SDC_XFER_RX = 2
++};
++
++struct sdc_hw {
++	bool cmd_mode;
++	uint8_t latch;
++	uint8_t status;
++	uint8_t cmd;
++	uint8_t preg[3];
++	/* LSN / extra params are sampled when the command is written.
++	 * CommSDC then reuses $FF4A/$FF4B as the 256-byte data port. */
++	uint8_t latched_preg[3];
++	uint8_t block[SDC_STREAM_SIZE];
++	unsigned xfer_index;
++	unsigned xfer_limit; /* SDC_BLOCK_SIZE or SDC_STREAM_SIZE */
++	unsigned xfer;  /* enum sdc_xfer */
++	/* Stream ($90/$91): keep BUSY across 512-byte sectors; after each
++	 * sector cmd_ready asks the cart to refill or finish (EOF). */
++	bool streaming;
++	bool stream_8bit; /* $9X bit 1 / $8X bit 2: 8-bit RX via $FF4B only */
++	/* Set when a command finishes (BUSY cleared).  The cart logs then
++	 * clears this. */
++	bool completed;
++	/* Params (and optional TX block) are ready for the cart to execute. */
++	bool cmd_ready;
++};
++
++static inline void sdc_hw_reset(struct sdc_hw *h) {
++	memset(h, 0, sizeof(*h));
++}
++
++/* Return the low-nibble register index, or -1 if A is not an SDC register. */
++static inline int sdc_hw_reg(uint16_t A) {
++	if ((A & 0xfff0) != 0xff40) {
++		return -1;
++	}
++	switch (A & 0x0f) {
++	case 0x00:
++	case 0x08:
++	case 0x09:
++	case 0x0a:
++	case 0x0b:
++		return (int)(A & 0x0f);
++	default:
++		return -1;
++	}
++}
++
++static inline void sdc_hw_succeed(struct sdc_hw *h) {
++	h->xfer = SDC_XFER_NONE;
++	h->xfer_index = 0;
++	h->xfer_limit = 0;
++	h->streaming = false;
++	h->status = 0;
++	h->cmd_ready = false;
++	h->completed = true;
++}
++
++static inline void sdc_hw_fail(struct sdc_hw *h, uint8_t bits) {
++	h->xfer = SDC_XFER_NONE;
++	h->xfer_index = 0;
++	h->xfer_limit = 0;
++	h->streaming = false;
++	h->status = (uint8_t)(SDC_FAILED | bits);
++	h->cmd_ready = false;
++	h->completed = true;
++}
++
++static inline void sdc_hw_start_rx_n(struct sdc_hw *h, unsigned n, int streaming) {
++	h->xfer = SDC_XFER_RX;
++	h->xfer_index = 0;
++	h->xfer_limit = n;
++	h->streaming = streaming ? true : false;
++	h->status = (uint8_t)(SDC_BUSY | SDC_READY);
++	h->cmd_ready = false;
++	h->completed = false;
++}
++
++/* Present h->block as a 256-byte response.  CommSDC waits for READY. */
++static inline void sdc_hw_start_rx(struct sdc_hw *h) {
++	sdc_hw_start_rx_n(h, SDC_BLOCK_SIZE, 0);
++}
++
++/* 512-byte stream sector.  BUSY stays set after the sector so the cart can
++ * refill (READY again) or clear BUSY at EOF. */
++static inline void sdc_hw_start_stream_rx(struct sdc_hw *h) {
++	sdc_hw_start_rx_n(h, SDC_STREAM_SIZE, 1);
++}
++
++static inline uint8_t sdc_hw_take_rx(struct sdc_hw *h) {
++	uint8_t v;
++
++	if (h->xfer != SDC_XFER_RX || h->xfer_index >= h->xfer_limit) {
++		return 0;
++	}
++	v = h->block[h->xfer_index++];
++	if (h->xfer_index >= h->xfer_limit) {
++		if (h->streaming) {
++			/* Drop READY between sectors; keep BUSY.  cmd_ready
++			 * asks sdc_fs_execute to refill or finish.
++			 * Play's interleaved load (after ~166 dummy samples)
++			 * then blast-reads $FF4A without a READY wait loop,
++			 * so the cart must refill on this last byte — not
++			 * wait for a later $FF48 poll. */
++			h->xfer = SDC_XFER_NONE;
++			h->status = SDC_BUSY;
++			h->cmd_ready = true;
++			h->completed = false;
++		} else {
++			sdc_hw_succeed(h);
++		}
++	}
++	return v;
++}
++
++/* VERSION and the $1C program-mode handshake have no payload and no
++ * filesystem work.  Returns 1 if the command was handled. */
++static inline int sdc_hw_take_builtin(struct sdc_hw *h) {
++	if (!h->cmd_ready) {
++		return 0;
++	}
++	if ((h->cmd & 0xfe) == 0xc0 && h->preg[0] == 'V') {
++		h->preg[1] = (uint8_t)(SDC_FW_VERSION_BCD >> 8);
++		h->preg[2] = (uint8_t)(SDC_FW_VERSION_BCD & 0xff);
++		sdc_hw_succeed(h);
++		return 1;
++	}
++	if (h->cmd == 0x1c) {
++		/* Program-mode handshake used by SDCReset in SDC_FileAccess.asm */
++		h->preg[0] = 'P';
++		h->preg[1] = 'M';
++		sdc_hw_succeed(h);
++		return 1;
++	}
++	return 0;
++}
++
++static inline void sdc_hw_tx_done(struct sdc_hw *h) {
++	h->xfer = SDC_XFER_NONE;
++	h->status = SDC_BUSY;
++	h->cmd_ready = true;
++}
++
++static inline void sdc_hw_start_command(struct sdc_hw *h, uint8_t cmd) {
++	h->cmd = cmd;
++	h->completed = false;
++	h->cmd_ready = false;
++	h->xfer_index = 0;
++	h->xfer_limit = 0;
++	h->streaming = false;
++	h->stream_8bit = false;
++	h->latched_preg[0] = h->preg[0];
++	h->latched_preg[1] = h->preg[1];
++	h->latched_preg[2] = h->preg[2];
++	memset(h->block, 0, sizeof(h->block));
++
++	if (cmd & 0x20) {
++		/* Bit 5: host will send a 256-byte parameter/data block. */
++		h->xfer = SDC_XFER_TX;
++		h->status = (uint8_t)(SDC_BUSY | SDC_READY);
++	} else {
++		/* Keep BUSY until the cart succeeds, fails, or starts RX. */
++		h->xfer = SDC_XFER_NONE;
++		h->status = SDC_BUSY;
++		h->cmd_ready = true;
++	}
++}
++
++static inline uint8_t sdc_hw_read(struct sdc_hw *h, int reg) {
++	switch (reg) {
++	case 0x00:
++		return h->latch;
++	case 0x08:
++		return h->status;
++	case 0x09:
++		return h->preg[0];
++	case 0x0a:
++		if (h->xfer == SDC_XFER_RX && !h->stream_8bit) {
++			uint8_t v = sdc_hw_take_rx(h);
++			h->preg[1] = v;
++			return v;
++		}
++		return h->preg[1];
++	case 0x0b:
++		if (h->xfer == SDC_XFER_RX) {
++			uint8_t v = sdc_hw_take_rx(h);
++			h->preg[2] = v;
++			return v;
++		}
++		return h->preg[2];
++	default:
++		return 0;
++	}
++}
++
++static inline void sdc_hw_write(struct sdc_hw *h, int reg, uint8_t D) {
++	switch (reg) {
++	case 0x00:
++		h->latch = D;
++		if (D == SDC_CMDMODE) {
++			h->cmd_mode = true;
++			if (h->xfer == SDC_XFER_NONE) {
++				h->status = 0;
++			}
++		} else {
++			/* Leaving command mode aborts an in-flight transfer
++			 * (including stream) but keeps param registers
++			 * (VERSION is read after CommSDC clears $FF40). */
++			h->cmd_mode = false;
++			h->xfer = SDC_XFER_NONE;
++			h->xfer_index = 0;
++			h->xfer_limit = 0;
++			h->streaming = false;
++			h->cmd_ready = false;
++			h->status = 0;
++		}
++		break;
++
++	case 0x08:
++		if (h->cmd_mode) {
++			if (D == 0xd0) {
++				/* Abort stream.  Play BREAK writes $D0 and
++				 * does not waitForIt; complete in this write
++				 * so BUSY is already clear. */
++				h->cmd = D;
++				sdc_hw_succeed(h);
++			} else {
++				sdc_hw_start_command(h, D);
++			}
++		}
++		break;
++
++	case 0x09:
++		h->preg[0] = D;
++		break;
++
++	case 0x0a:
++		h->preg[1] = D;
++		if (h->xfer == SDC_XFER_TX && h->xfer_index < SDC_BLOCK_SIZE) {
++			h->block[h->xfer_index++] = D;
++			if (h->xfer_index >= SDC_BLOCK_SIZE) {
++				sdc_hw_tx_done(h);
++			}
++		}
++		break;
++
++	case 0x0b:
++		h->preg[2] = D;
++		if (h->xfer == SDC_XFER_TX && h->xfer_index < SDC_BLOCK_SIZE) {
++			h->block[h->xfer_index++] = D;
++			if (h->xfer_index >= SDC_BLOCK_SIZE) {
++				sdc_hw_tx_done(h);
++			}
++		}
++		break;
++
++	default:
++		break;
++	}
++}
++
++/* Optional Becker / DriveWire / FujiNet port on the CoCoSDC cart.
++ *
++ * Same partial decode as rsdos.c once A3 is clear: (A&3)==1 is status,
++ * (A&3)==2 is data.  Inside the $FF40 page that is $FF41/$FF45 and
++ * $FF42/$FF46.  $FF48–$FF4F (A3 set) stay SDC/FDC, so $FF49/$FF4A are
++ * never Becker even though their low bits match.
++ *
++ * $FF42 is also the flash data helper.  When -cart-becker is active,
++ * Becker wins and flash data is not read or written.  $FF43 stays the
++ * flash bank probe.  With Becker off, $FF41 is unused and $FF42/$FF43
++ * stay flash.
++ *
++ * becker_active is true only when the port actually opened. */
++
++enum {
++	COCOSDC_P2_OTHER = 0,
++	COCOSDC_P2_SDC = 1,
++	COCOSDC_P2_FLASH = 2,
++	COCOSDC_P2_BECKER_STATUS = 3,
++	COCOSDC_P2_BECKER_DATA = 4
++};
++
++static inline int cocosdc_p2_class(uint16_t A, int becker_active) {
++	if (sdc_hw_reg(A) >= 0) {
++		return COCOSDC_P2_SDC;
++	}
++	/* $FF40–$FF47 only.  A3 selects the SDC/FDC block, as in rsdos. */
++	if (becker_active && (A & 0xfff8) == 0xff40) {
++		switch (A & 3) {
++		case 1:
++			return COCOSDC_P2_BECKER_STATUS;
++		case 2:
++			return COCOSDC_P2_BECKER_DATA;
++		default:
++			break;
++		}
++	}
++	if ((A & 0xfff0) == 0xff40) {
++		switch (A & 0x0f) {
++		case 0x02:
++		case 0x03:
++			return COCOSDC_P2_FLASH;
++		default:
++			break;
++		}
++	}
++	return COCOSDC_P2_OTHER;
++}
++
++#endif
+diff --git a/src/part.c b/src/part.c
+index be3eb863..6256d4de 100644
+--- a/src/part.c
++++ b/src/part.c
+@@ -118,8 +118,8 @@ const struct partdb_entry *partdb[] = {
+ 	(const struct partdb_entry *)&rsdos_part,
+ 	(const struct partdb_entry *)&idecart_part,
+ #ifndef HAVE_WASM
+-#ifdef WANT_EXPERIMENTAL
+ 	(const struct partdb_entry *)&cocosdc_part,
++#ifdef WANT_EXPERIMENTAL
+ 	(const struct partdb_entry *)&ikon_part,
+ #endif
+ #endif
+diff --git a/src/xroar.c b/src/xroar.c
+index b8ff08b8..864aa606 100644
+--- a/src/xroar.c
++++ b/src/xroar.c
+@@ -604,11 +604,12 @@ static char const * const default_config[] = {
+ 	"cart-type ide",
+ 	"cart-becker",
+ #ifndef HAVE_WASM
+-#ifdef WANT_EXPERIMENTAL
+-	// CoCoSDC cartridge
++	// CoCoSDC cartridge (implementation from the nowhereman999 fork)
+ 	"cart cocosdc",
+ 	"cart-desc 'CoCoSDC'",
+ 	"cart-type cocosdc",
++	"cart-rom @sdcdos",
++#ifdef WANT_EXPERIMENTAL
+ 	// Ikon Ultra Drive cartridge
+ 	"cart ikon",
+ 	"cart-desc 'Ikon Ultra Drive cartridge'",
+@@ -721,6 +722,8 @@ static char const * const default_config[] = {
+ #endif
+ 	// RSDOS with becker port
+ 	"romlist rsdos_becker=hdbdw3bck",
++	// CoCoSDC SDC-DOS flash
++	"romlist sdcdos=sdcdos,sdc-dos,sdc_dos,SDCDOS",
+ #endif
+ #endif
+ 
+@@ -3174,6 +3177,7 @@ static struct xconfig_option const xroar_options[] = {
+ 	{ XC_SET_INT1("cart-autorun", &private_cfg.cart.autorun) },
+ 	{ XC_SET_INT1("cart-becker", &private_cfg.cart.becker) },
+ 	{ XC_SET_STRING_LIST_NE("cart-opt", &private_cfg.cart.opts) },
++	{ XC_SET_STRING_NE("sdc-root", &xroar.cfg.sdc.root) },
+ 
+ 	/* Multi-Pak Interface: */
+ 	{ XC_SET_INT("mpi-slot", &private_cfg.cart.mpi.initial_slot) },
+@@ -3434,6 +3438,7 @@ static void helptext(void) {
+ " Hard disks:\n"
+ "  -load-hdX FILE        use hard disk image FILE as drive X (0-1, e.g. for ide)\n"
+ "  -load-sd FILE         use SD card image FILE (e.g. for mooh, nx32)\n"
++"  -sdc-root DIR         host directory mapped as CoCoSDC SD card root\n"
+ "\n"
+ 
+ " Keyboard:\n"
+@@ -3652,6 +3657,7 @@ static void config_print_all(FILE *f, bool all) {
+ 	xroar_cfg_print_string(f, all, "load-fd3", private_cfg.file.fd[3], NULL);
+ 	xroar_cfg_print_string(f, all, "load-hd0", private_cfg.file.hd[0], NULL);
+ 	xroar_cfg_print_string(f, all, "load-hd1", private_cfg.file.hd[1], NULL);
++	xroar_cfg_print_string(f, all, "sdc-root", xroar.cfg.sdc.root, NULL);
+ 	xroar_cfg_print_string(f, all, "load-tape", private_cfg.file.tape, NULL);
+ 	xroar_cfg_print_string(f, all, "tape-write", private_cfg.file.tape_write, NULL);
+ 	xroar_cfg_print_string(f, all, "load-text", private_cfg.file.text, NULL);
+diff --git a/src/xroar.h b/src/xroar.h
+index 12e9dd96..072683c1 100644
+--- a/src/xroar.h
++++ b/src/xroar.h
+@@ -125,6 +125,11 @@ struct xroar_cfg {
+ 		bool auto_sd;
+ 	} disk;
+ 
++	// CoCoSDC: host directory treated as the SD card root
++	struct {
++		char *root;
++	} sdc;
++
+ 	// XXX this might make more sense as a per-machine option
+ 	bool force_crc_match;
+ 
+diff --git a/tools/cocosdc_fs_test.c b/tools/cocosdc_fs_test.c
+new file mode 100644
+index 00000000..0710e568
+--- /dev/null
++++ b/tools/cocosdc_fs_test.c
+@@ -0,0 +1,1723 @@
++/* Host-side CommSDC + sdc_fs against a temporary -sdc-root.
++ *
++ * Mirrors SDC_Comm.asm waitForIt / 256-byte $FF4A/$FF4B transfers and the
++ * FileAccess commands Phase B implements (mount, dir/info/CWD, LSN R/W)
++ * plus Phase C stream ($90/$91 512-byte sectors, abort $D0) as used by
++ * SDC_StreamFile_Library.asm / SDC_BigLoadm.asm, and Phase D Play
++ * (SDC_Play.asm open/stream/interleaved 512 / $D0 / CLR $FF40).
++ *
++ * Compile / run (no XRoar, no SDL):
++ *   ./tools/run-cocosdc-tests.sh
++ */
++#define _DEFAULT_SOURCE
++
++#include <dirent.h>
++#include <limits.h>
++#include <stdio.h>
++#include <stdint.h>
++#include <stdlib.h>
++#include <string.h>
++#include <sys/stat.h>
++#include <unistd.h>
++
++#include "cocosdc_fdc.h"
++#include "cocosdc_fs.h"
++#include "cocosdc_hw.h"
++
++#ifndef PATH_MAX
++#define PATH_MAX 4096
++#endif
++
++static struct sdc_fs fs;
++static struct sdc_hw hw;
++static uint8_t last_status;
++static int last_wait;
++static int nfail;
++static int ncheck;
++static char root_path[PATH_MAX];
++
++static void put_cmd(uint8_t *block, const char *s);
++
++static int check(int cond, const char *msg) {
++	ncheck++;
++	if (!cond) {
++		fprintf(stderr, "FAIL: %s (status=$%02X wait=%d)\n",
++			msg, last_status, last_wait);
++		nfail++;
++		return 0;
++	}
++	return 1;
++}
++
++static int wait_for_it(void) {
++	last_status = sdc_hw_read(&hw, 0x08);
++	if (last_status & SDC_FAILED) {
++		return -1;
++	}
++	if (!(last_status & SDC_BUSY)) {
++		return 0;
++	}
++	if (last_status & SDC_READY) {
++		return 1;
++	}
++	return -1;
++}
++
++static void pump(void) {
++	sdc_fs_execute(&fs, &hw);
++}
++
++static void leave_cmd(void) {
++	sdc_hw_write(&hw, 0x00, 0);
++}
++
++/* StreamFile / BIGLOADM: not CommSDC.  $90 is READY per 512-byte sector. */
++static int stream_start(uint8_t cmd, uint32_t lsn) {
++	sdc_hw_write(&hw, 0x00, SDC_CMDMODE);
++	sdc_hw_write(&hw, 0x09, (uint8_t)(lsn >> 16));
++	sdc_hw_write(&hw, 0x0a, (uint8_t)(lsn >> 8));
++	sdc_hw_write(&hw, 0x0b, (uint8_t)lsn);
++	last_wait = wait_for_it();
++	if (last_wait < 0) {
++		leave_cmd();
++		return -1;
++	}
++	sdc_hw_write(&hw, 0x08, cmd);
++	pump();
++	last_wait = wait_for_it();
++	return last_wait;
++}
++
++/* Read one 512-byte stream sector (LDD $FF4A / LDU ,Y style).  pump() after
++ * each DATREG read so the last byte can refill or clear BUSY (cart path). */
++static int stream_read_512(uint8_t *buf) {
++	int i;
++
++	for (i = 0; i < (int)SDC_STREAM_SIZE; i++) {
++		buf[i] = sdc_hw_read(&hw, (i & 1) ? 0x0b : 0x0a);
++		pump();
++	}
++	last_wait = wait_for_it();
++	return last_wait;
++}
++
++static void stream_abort(void) {
++	sdc_hw_write(&hw, 0x08, 0xd0);
++	pump();
++	last_wait = wait_for_it();
++}
++
++/* Play.asm: LDA $FF48 / ASRA / LBCC eof / BEQ wait.
++ *  0 = not busy (EOF), 1 = BUSY|READY (proceed), -1 = wait / fail. */
++static int play_asra(void) {
++	last_status = sdc_hw_read(&hw, 0x08);
++	if (last_status & SDC_FAILED) {
++		return -1;
++	}
++	if (!(last_status & SDC_BUSY)) {
++		return 0;
++	}
++	if (last_status & SDC_READY) {
++		return 1;
++	}
++	return -1;
++}
++
++/* LDU <$4A / LDD $FF4A: high from $FF4A, low from $FF4B.  pump() after each
++ * DATREG read so the last byte of a sector refills like the cart. */
++static uint16_t play_ldd_ff4a(void) {
++	uint8_t hi = sdc_hw_read(&hw, 0x0a);
++	pump();
++	uint8_t lo = sdc_hw_read(&hw, 0x0b);
++	pump();
++	return (uint16_t)(((uint16_t)hi << 8) | lo);
++}
++
++static void play_read_512_words(uint8_t *buf) {
++	int i;
++
++	for (i = 0; i < (int)(SDC_STREAM_SIZE / 2); i++) {
++		uint16_t w = play_ldd_ff4a();
++		buf[i * 2] = (uint8_t)(w >> 8);
++		buf[i * 2 + 1] = (uint8_t)w;
++	}
++	last_wait = wait_for_it();
++}
++
++/* OpenSDC_File_X_At_Start (StreamFile / Play): stay in command mode between
++ * $E0/$E1 mount and $90/$91.  Play defaults SDC_DriveNumber to 1. */
++static int open_sdc_file_x_at_start(uint8_t drive, const char *m_path) {
++	uint8_t block[SDC_BLOCK_SIZE];
++	int i;
++
++	sdc_hw_write(&hw, 0x00, SDC_CMDMODE);
++	last_wait = wait_for_it();
++	if (last_wait < 0 || (last_status & SDC_BUSY)) {
++		leave_cmd();
++		return -1;
++	}
++	sdc_hw_write(&hw, 0x08, (uint8_t)(0xe0 + (drive & 1)));
++	pump();
++	last_wait = wait_for_it();
++	if (last_wait != 1) {
++		leave_cmd();
++		return -1;
++	}
++	put_cmd(block, m_path);
++	for (i = 0; i < (int)SDC_BLOCK_SIZE; i++) {
++		sdc_hw_write(&hw, (i & 1) ? 0x0b : 0x0a, block[i]);
++	}
++	pump();
++	last_wait = wait_for_it();
++	if (last_wait < 0 || (last_status & SDC_BUSY)) {
++		leave_cmd();
++		return -1;
++	}
++	/* 24-bit LSN 0, then $43 again, then stream (OpenSDC_File_X). */
++	sdc_hw_write(&hw, 0x09, 0);
++	sdc_hw_write(&hw, 0x0a, 0);
++	sdc_hw_write(&hw, 0x0b, 0);
++	sdc_hw_write(&hw, 0x00, SDC_CMDMODE);
++	last_wait = wait_for_it();
++	if (last_wait < 0 || (last_status & SDC_BUSY)) {
++		leave_cmd();
++		return -1;
++	}
++	sdc_hw_write(&hw, 0x08, (uint8_t)(0x90 + (drive & 1)));
++	pump();
++	last_wait = wait_for_it();
++	return last_wait;
++}
++
++/* CommSDC: A=cmd, B=param1, X=param2/3, optional 256-byte buffer. */
++static int comm_sdc(uint8_t cmd, uint8_t b, uint16_t x, uint8_t *buf, int have_buf) {
++	sdc_hw_write(&hw, 0x00, SDC_CMDMODE);
++	sdc_hw_write(&hw, 0x09, b);
++	sdc_hw_write(&hw, 0x0a, (uint8_t)(x >> 8));
++	sdc_hw_write(&hw, 0x0b, (uint8_t)(x & 0xff));
++	last_wait = wait_for_it();
++	if (last_wait < 0) {
++		leave_cmd();
++		return -1;
++	}
++	sdc_hw_write(&hw, 0x08, cmd);
++	pump();
++	if (cmd & 0x20) {
++		last_wait = wait_for_it();
++		if (last_wait != 1) {
++			leave_cmd();
++			return -1;
++		}
++		for (int i = 0; i < SDC_BLOCK_SIZE; i++) {
++			uint8_t v = buf ? buf[i] : 0;
++			sdc_hw_write(&hw, (i & 1) ? 0x0b : 0x0a, v);
++		}
++		pump();
++		last_wait = wait_for_it();
++		if (last_wait < 0 || (last_status & SDC_BUSY)) {
++			leave_cmd();
++			return -1;
++		}
++	} else {
++		last_wait = wait_for_it();
++		if (last_wait < 0) {
++			leave_cmd();
++			return -1;
++		}
++		if (last_wait == 1 && have_buf && buf) {
++			for (int i = 0; i < SDC_BLOCK_SIZE; i++) {
++				buf[i] = sdc_hw_read(&hw, (i & 1) ? 0x0b : 0x0a);
++			}
++			last_status = sdc_hw_read(&hw, 0x08);
++		}
++	}
++	leave_cmd();
++	return 0;
++}
++
++static void put_cmd(uint8_t *block, const char *s) {
++	size_t n = strlen(s);
++	memset(block, 0, SDC_BLOCK_SIZE);
++	if (n >= SDC_BLOCK_SIZE) {
++		n = SDC_BLOCK_SIZE - 1;
++	}
++	memcpy(block, s, n);
++}
++
++static int write_file(const char *path, const void *data, size_t n) {
++	FILE *f = fopen(path, "wb");
++	if (!f) {
++		return -1;
++	}
++	if (n && fwrite(data, 1, n, f) != n) {
++		fclose(f);
++		return -1;
++	}
++	fclose(f);
++	return 0;
++}
++
++static int rm_path(const char *path) {
++	DIR *d = opendir(path);
++	if (d) {
++		struct dirent *de;
++		while ((de = readdir(d)) != NULL) {
++			char child[PATH_MAX];
++			if (de->d_name[0] == '.' &&
++			    (de->d_name[1] == 0 ||
++			     (de->d_name[1] == '.' && de->d_name[2] == 0))) {
++				continue;
++			}
++			if (snprintf(child, sizeof(child), "%s/%s", path, de->d_name) >=
++			    (int)sizeof(child)) {
++				closedir(d);
++				return -1;
++			}
++			rm_path(child);
++		}
++		closedir(d);
++		return rmdir(path);
++	}
++	return unlink(path);
++}
++
++static int host_size(const char *rel, long *out) {
++	char path[PATH_MAX];
++	struct stat st;
++	if (snprintf(path, sizeof(path), "%s/%s", root_path, rel) >= (int)sizeof(path)) {
++		return -1;
++	}
++	if (stat(path, &st) != 0) {
++		return -1;
++	}
++	*out = (long)st.st_size;
++	return 0;
++}
++
++static int rec_named(const uint8_t *page, const char *fat11) {
++	for (int i = 0; i < 16; i++) {
++		const uint8_t *r = page + i * 16;
++		if (r[0] == 0) {
++			break;
++		}
++		if (memcmp(r, fat11, 11) == 0) {
++			return i;
++		}
++	}
++	return -1;
++}
++
++static uint32_t le32(const uint8_t *p) {
++	return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
++	       ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
++}
++
++static uint32_t be32(const uint8_t *p) {
++	return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) |
++	       ((uint32_t)p[2] << 8) | (uint32_t)p[3];
++}
++
++static int failed_bits(uint8_t bits) {
++	return (last_status & SDC_FAILED) && ((last_status & bits) == bits);
++}
++
++/* - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - */
++
++static void test_version_reset(void) {
++	check(comm_sdc(0xc0, 'V', 0, NULL, 0) == 0, "VERSION");
++	check(sdc_hw_read(&hw, 0x0a) == 0x01 && sdc_hw_read(&hw, 0x0b) == 0x27,
++	      "VERSION BCD 1.27 after leaving command mode");
++	check(comm_sdc(0x1c, 0xaa, 0x5500, NULL, 0) == 0, "RESET $1C");
++	check(sdc_hw_read(&hw, 0x09) == 'P' && sdc_hw_read(&hw, 0x0a) == 'M',
++	      "RESET returns PM");
++}
++
++static void test_missing_and_eject(void) {
++	uint8_t block[SDC_BLOCK_SIZE];
++	put_cmd(block, "m:MISSING.BIN");
++	check(comm_sdc(0xe0, 0, 0, block, 1) != 0, "missing mount fails");
++	check(failed_bits(SDC_ERR_NOTFOUND), "missing mount FAILED|$10");
++
++	put_cmd(block, "M:");
++	check(comm_sdc(0xe0, 0, 0, block, 1) == 0, "eject empty slot 0");
++	check(comm_sdc(0x80, 0, 0, block, 1) != 0, "read with nothing mounted fails");
++	check(last_status & SDC_FAILED, "read unmounted FAILED");
++}
++
++static void test_mount_read_info(const char *hello, size_t hello_n) {
++	uint8_t block[SDC_BLOCK_SIZE];
++	uint32_t sz;
++
++	put_cmd(block, "m:HELLO.TXT");
++	check(comm_sdc(0xe0, 0, 0, block, 1) == 0, "mount m:HELLO.TXT");
++
++	memset(block, 0, sizeof(block));
++	check(comm_sdc(0x80, 0, 0, block, 1) == 0, "read LSN 0");
++	check(last_wait == 1, "read LSN offered READY payload");
++	check(memcmp(block, hello, hello_n) == 0, "LSN 0 matches host file");
++	check(block[hello_n] == 0, "short file zero-padded in sector");
++
++	memset(block, 0, sizeof(block));
++	check(comm_sdc(0xc0, 'I', 0, block, 1) == 0, "INFO");
++	check(memcmp(block, "HELLO   TXT", 11) == 0, "INFO 8.3 name");
++	sz = le32(block + 28);
++	check(sz == (uint32_t)hello_n, "INFO size LSB-first at 28-31");
++
++	check(comm_sdc(0xc0, 'Q', 0, NULL, 0) == 0, "QUERY size");
++	check(sdc_hw_read(&hw, 0x09) == 0 && sdc_hw_read(&hw, 0x0a) == 0 &&
++	      sdc_hw_read(&hw, 0x0b) == 1, "QUERY sector count 1");
++
++	/* FileExists sequence: mount then M: eject. */
++	put_cmd(block, "M:");
++	check(comm_sdc(0xe0, 0, 0, block, 1) == 0, "eject after info");
++	check(comm_sdc(0xc0, 'I', 0, block, 1) != 0, "INFO after eject fails");
++	check(failed_bits(SDC_ERR_NOTFOUND), "INFO unmounted FAILED|$10");
++}
++
++static void test_case_partial_and_cwd(void) {
++	uint8_t block[SDC_BLOCK_SIZE];
++
++	put_cmd(block, "m:games/foo.bin");
++	check(comm_sdc(0xe0, 0, 0, block, 1) == 0, "mount m:games/foo.bin (case)");
++	memset(block, 0, sizeof(block));
++	check(comm_sdc(0x80, 0, 0, block, 1) == 0 && block[0] == 'F' && block[2] == 'O',
++	      "FOO.BIN LSN 0");
++	memset(block, 0xaa, sizeof(block));
++	check(comm_sdc(0x80, 0, 1, block, 1) == 0, "FOO.BIN LSN 1 partial");
++	check(block[0] == 0x5a && block[43] == 0x5a && block[44] == 0,
++	      "partial sector padded with zeros");
++	check(comm_sdc(0x80, 0, 2, block, 1) != 0, "LSN past EOF fails");
++	put_cmd(block, "M:");
++	(void)comm_sdc(0xe0, 0, 0, block, 1);
++
++	put_cmd(block, "m:/GAMES/FOO.BIN");
++	check(comm_sdc(0xe0, 0, 0, block, 1) == 0, "absolute /GAMES/FOO.BIN");
++	put_cmd(block, "M:");
++	(void)comm_sdc(0xe0, 0, 0, block, 1);
++
++	/* CWD at volume root: bits 4+7, no payload (CommSDC BMI on FAILED). */
++	check(comm_sdc(0xc0, 'C', 0, block, 1) != 0, "CWD at root fails");
++	check(failed_bits(SDC_ERR_NOTFOUND), "CWD root FAILED|$10");
++
++	put_cmd(block, "D:GAMES");
++	check(comm_sdc(0xe0, 0, 0, block, 1) == 0, "D:GAMES");
++	memset(block, 0, sizeof(block));
++	check(comm_sdc(0xc0, 'C', 0, block, 1) == 0, "CWD leaf");
++	check(memcmp(block, "GAMES      ", 11) == 0, "CWD 8.3 name");
++	put_cmd(block, "m:FOO.BIN");
++	check(comm_sdc(0xe0, 0, 0, block, 1) == 0, "mount relative to CWD");
++	put_cmd(block, "M:");
++	(void)comm_sdc(0xe0, 0, 0, block, 1);
++	put_cmd(block, "D:/");
++	check(comm_sdc(0xe0, 0, 0, block, 1) == 0, "D:/ back to root");
++}
++
++static void test_create_write_lsn_latch(void) {
++	uint8_t block[SDC_BLOCK_SIZE];
++	uint8_t a[SDC_BLOCK_SIZE];
++	uint8_t b[SDC_BLOCK_SIZE];
++	long sz = -1;
++
++	put_cmd(block, "n:NEWFILE.BIN");
++	check(comm_sdc(0xe0, 0, 0, block, 1) == 0, "n:NEWFILE.BIN");
++
++	/* Payload of 0x3c would look like LSN 0x003C3C if params were not latched. */
++	memset(a, 0x3c, sizeof(a));
++	memcpy(a, "WRITTEN", 7);
++	check(comm_sdc(0xa0, 0, 0, a, 1) == 0, "write LSN 0");
++	check(host_size("NEWFILE.BIN", &sz) == 0 && sz == SDC_BLOCK_SIZE,
++	      "write LSN 0 size is 256 (LSN latched, not clobbered by data port)");
++
++	memset(b, 'B', sizeof(b));
++	check(comm_sdc(0xa0, 0, 1, b, 1) == 0, "write LSN 1");
++	check(host_size("NEWFILE.BIN", &sz) == 0 && sz == 2 * SDC_BLOCK_SIZE,
++	      "two sequential FileAccess-style LBNs");
++
++	put_cmd(block, "M:");
++	check(comm_sdc(0xe0, 0, 0, block, 1) == 0, "eject after writes");
++	put_cmd(block, "m:NEWFILE.BIN");
++	check(comm_sdc(0xe0, 0, 0, block, 1) == 0, "reopen NEWFILE.BIN");
++	memset(block, 0, sizeof(block));
++	check(comm_sdc(0x80, 0, 0, block, 1) == 0 && memcmp(block, "WRITTEN", 7) == 0,
++	      "read back LSN 0");
++	memset(block, 0, sizeof(block));
++	check(comm_sdc(0x80, 0, 1, block, 1) == 0 && block[0] == 'B' && block[255] == 'B',
++	      "read back LSN 1");
++
++	memset(block, 0, sizeof(block));
++	check(comm_sdc(0xc0, 'I', 0, block, 1) == 0, "INFO after write");
++	check(le32(block + 28) == 2u * SDC_BLOCK_SIZE, "INFO size 512");
++	put_cmd(block, "M:");
++	(void)comm_sdc(0xe0, 0, 0, block, 1);
++}
++
++static void test_slots_inuse(void) {
++	uint8_t block[SDC_BLOCK_SIZE];
++	uint8_t data[SDC_BLOCK_SIZE];
++
++	put_cmd(block, "m:HELLO.TXT");
++	check(comm_sdc(0xe0, 0, 0, block, 1) == 0, "slot 0 HELLO");
++	put_cmd(block, "m:HELLO.TXT");
++	check(comm_sdc(0xe1, 0, 0, block, 1) != 0, "same file on slot 1 is in use");
++	check(failed_bits(SDC_ERR_INUSE), "in use FAILED|$20");
++
++	put_cmd(block, "n:SLOT1.BIN");
++	check(comm_sdc(0xe1, 0, 0, block, 1) == 0, "n: on slot 1");
++	memset(data, 0x11, sizeof(data));
++	data[0] = 'S';
++	check(comm_sdc(0xa1, 0, 0, data, 1) == 0, "write slot 1 LSN 0");
++	memset(block, 0, sizeof(block));
++	check(comm_sdc(0x81, 0, 0, block, 1) == 0 && block[0] == 'S' && block[1] == 0x11,
++	      "read slot 1");
++
++	put_cmd(block, "M:");
++	check(comm_sdc(0xe0, 0, 0, block, 1) == 0, "eject slot 0");
++	check(comm_sdc(0xe1, 0, 0, block, 1) == 0, "eject slot 1");
++}
++
++static void test_dir_listing(const char *hello, size_t hello_n) {
++	uint8_t block[SDC_BLOCK_SIZE];
++	int i, nrec, idx;
++	char path[PATH_MAX];
++
++	put_cmd(block, "L:*.*");
++	check(comm_sdc(0xe0, 0, 0, block, 1) == 0, "L:*.*");
++	memset(block, 0, sizeof(block));
++	check(comm_sdc(0xc0, '>', 0, block, 1) == 0, "DIR page");
++	check(last_wait == 1, "DIR page READY");
++	check(rec_named(block, "HELLO   TXT") >= 0, "DIR has HELLO.TXT");
++	check(rec_named(block, "GAMES      ") >= 0, "DIR has GAMES");
++	idx = rec_named(block, "HELLO   TXT");
++	if (idx >= 0) {
++		const uint8_t *r = block + idx * 16;
++		check(be32(r + 12) == (uint32_t)hello_n, "DIR size MSB-first at 12-15");
++		check((r[11] & SDC_ATTR_DIR) == 0, "HELLO is not a directory");
++	}
++	idx = rec_named(block, "GAMES      ");
++	if (idx >= 0) {
++		check((block[idx * 16 + 11] & SDC_ATTR_DIR) != 0, "GAMES attr $10");
++	}
++
++	put_cmd(block, "L:GAMES/*.BIN");
++	check(comm_sdc(0xe0, 0, 0, block, 1) == 0, "L:GAMES/*.BIN");
++	memset(block, 0, sizeof(block));
++	check(comm_sdc(0xc0, '>', 0, block, 1) == 0, "wildcard page");
++	check(rec_named(block, "FOO     BIN") >= 0, "wildcard sees FOO.BIN");
++	check(rec_named(block, "HELLO   TXT") < 0, "wildcard does not list root HELLO");
++
++	/* Two pages: 20 files → 16 + 4, unused records zero. */
++	if (snprintf(path, sizeof(path), "%s/PAGES", root_path) < (int)sizeof(path) &&
++	    mkdir(path, 0755) == 0) {
++		for (i = 0; i < 20; i++) {
++			char f[PATH_MAX];
++			char name[16];
++			snprintf(name, sizeof(name), "F%02d.DAT", i);
++			snprintf(f, sizeof(f), "%s/%s", path, name);
++			(void)write_file(f, name, strlen(name));
++		}
++		put_cmd(block, "L:PAGES/*.*");
++		check(comm_sdc(0xe0, 0, 0, block, 1) == 0, "L:PAGES/*.*");
++		memset(block, 0, sizeof(block));
++		check(comm_sdc(0xc0, '>', 0, block, 1) == 0, "DIR page 1");
++		nrec = 0;
++		for (i = 0; i < 16; i++) {
++			if (block[i * 16] != 0) {
++				nrec++;
++			}
++		}
++		check(nrec == 16, "first dir page has 16 records");
++		memset(block, 0, sizeof(block));
++		check(comm_sdc(0xc0, '>', 0, block, 1) == 0, "DIR page 2");
++		nrec = 0;
++		for (i = 0; i < 16; i++) {
++			if (block[i * 16] != 0) {
++				nrec++;
++			}
++		}
++		check(nrec == 4, "second dir page has 4 records");
++		check(block[4 * 16] == 0, "unused dir records are zero");
++	} else {
++		check(0, "mkdir PAGES");
++	}
++}
++
++static void test_mkdir_delete(void) {
++	uint8_t block[SDC_BLOCK_SIZE];
++	char path[PATH_MAX];
++	struct stat st;
++
++	put_cmd(block, "K:SUBDIR");
++	check(comm_sdc(0xe0, 0, 0, block, 1) == 0, "K:SUBDIR");
++	snprintf(path, sizeof(path), "%s/SUBDIR", root_path);
++	check(stat(path, &st) == 0 && S_ISDIR(st.st_mode), "SUBDIR exists on host");
++
++	put_cmd(block, "n:SUBDIR/TMP.BIN");
++	check(comm_sdc(0xe0, 0, 0, block, 1) == 0, "create file in SUBDIR");
++	put_cmd(block, "M:");
++	(void)comm_sdc(0xe0, 0, 0, block, 1);
++
++	put_cmd(block, "X:SUBDIR");
++	check(comm_sdc(0xe0, 0, 0, block, 1) != 0, "X: non-empty dir fails");
++
++	put_cmd(block, "X:SUBDIR/TMP.BIN");
++	check(comm_sdc(0xe0, 0, 0, block, 1) == 0, "X: file");
++	put_cmd(block, "X:SUBDIR");
++	check(comm_sdc(0xe0, 0, 0, block, 1) == 0, "X: empty dir");
++	check(stat(path, &st) != 0, "SUBDIR removed");
++}
++
++static void test_escape(void) {
++	uint8_t block[SDC_BLOCK_SIZE];
++
++	put_cmd(block, "m:../../etc/passwd");
++	check(comm_sdc(0xe0, 0, 0, block, 1) != 0, "path escape fails");
++	check((last_status & SDC_FAILED) != 0, "path escape FAILED");
++}
++
++static void test_stream(void) {
++	uint8_t name[SDC_BLOCK_SIZE];
++	uint8_t sec[SDC_STREAM_SIZE];
++	uint8_t file[SDC_STREAM_SIZE * 2 + 40];
++	char path[PATH_MAX];
++	size_t i;
++	size_t nfile = sizeof(file);
++
++	for (i = 0; i < nfile; i++) {
++		file[i] = (uint8_t)(i & 0xff);
++	}
++	file[0] = 0xa0;
++	file[511] = 0xa1;
++	file[512] = 0xb0;
++	file[1023] = 0xb1;
++	file[1024] = 0xc0;
++	file[nfile - 1] = 0xc1;
++	if (snprintf(path, sizeof(path), "%s/STREAM.BIN", root_path) >= (int)sizeof(path) ||
++	    write_file(path, file, nfile) != 0) {
++		check(0, "write STREAM.BIN");
++		return;
++	}
++
++	/* Unmounted $90 fails (POLLREADY would hang; waitForIt sees FAILED). */
++	check(stream_start(0x90, 0) < 0, "stream with nothing mounted fails");
++	check(last_status & SDC_FAILED, "unmounted stream FAILED");
++	leave_cmd();
++
++	put_cmd(name, "m:STREAM.BIN");
++	check(comm_sdc(0xe0, 0, 0, name, 1) == 0, "mount m:STREAM.BIN");
++
++	/* OpenSDC_File_X_At_Start: $90, POLLREADY, then 512-byte sectors. */
++	check(stream_start(0x90, 0) == 1, "stream $90 READY for first sector");
++	check((last_status & (SDC_BUSY | SDC_READY)) == (SDC_BUSY | SDC_READY),
++	      "stream first sector BUSY|READY");
++	check(stream_read_512(sec) == 1, "after sector 0 READY for sector 1");
++	check(sec[0] == 0xa0 && sec[511] == 0xa1 && sec[1] == 0x01,
++	      "stream sector 0 bytes");
++	check(memcmp(sec, file, SDC_STREAM_SIZE) == 0, "stream sector 0 matches host");
++
++	check(stream_read_512(sec) == 1, "after sector 1 READY for padded tail");
++	check(sec[0] == 0xb0 && sec[511] == 0xb1, "stream sector 1 boundary");
++	check(memcmp(sec, file + SDC_STREAM_SIZE, SDC_STREAM_SIZE) == 0,
++	      "stream sector 1 matches host");
++
++	check(stream_read_512(sec) == 0, "last stream sector then Not Busy (EOF)");
++	check(sec[0] == 0xc0 && sec[39] == 0xc1, "stream tail payload");
++	check(sec[40] == 0 && sec[511] == 0, "short last sector zero-padded to 512");
++	check(!(last_status & SDC_BUSY), "EOF clears BUSY");
++	leave_cmd();
++
++	/* LSN is a 512-byte stream sector (not FileAccess's 256-byte LBN). */
++	check(stream_start(0x90, 1) == 1, "stream from LSN 1");
++	check(stream_read_512(sec) == 1, "LSN 1 first sector is file+512");
++	check(sec[0] == 0xb0 && sec[511] == 0xb1, "LSN 1 skips first 512 bytes");
++	leave_cmd();
++
++	/* CLR $FF40 aborts an in-flight stream (Close_SD_File / BIGLOADM done). */
++	check(stream_start(0x90, 0) == 1, "stream for leave-cmd abort");
++	(void)sdc_hw_read(&hw, 0x0a);
++	pump();
++	leave_cmd();
++	check(!(sdc_hw_read(&hw, 0x08) & SDC_BUSY), "leave command mode clears stream BUSY");
++
++	/* $D0 abort (StreamTest.asm BREAK key) after the first sector. */
++	check(stream_start(0x90, 0) == 1, "stream for $D0 abort");
++	check(stream_read_512(sec) == 1, "sector 0 before abort");
++	check(sec[0] == 0xa0, "abort path still delivered sector 0");
++	stream_abort();
++	check(last_wait == 0 && !(last_status & SDC_FAILED),
++	      "abort $D0 is Not Busy");
++	leave_cmd();
++
++	put_cmd(name, "M:");
++	check(comm_sdc(0xe0, 0, 0, name, 1) == 0, "eject STREAM.BIN");
++
++	/* Idle $D0 still must not hang (Phase B). */
++	check(comm_sdc(0xd0, 0, 0, NULL, 0) == 0, "idle abort $D0 does not hang");
++
++	/* Slot 1: StreamFile defaults SDC_DriveNumber to 1 ($E1 / $91). */
++	put_cmd(name, "m:GAMES/FOO.BIN");
++	check(comm_sdc(0xe1, 0, 0, name, 1) == 0, "mount FOO.BIN slot 1");
++	check(stream_start(0x91, 0) == 1, "stream $91 READY");
++	check(stream_read_512(sec) == 0, "FOO.BIN one padded 512 then EOF");
++	check(sec[0] == 'F' && sec[1] == 'O' && sec[2] == 'O' && sec[3] == 0x5a,
++	      "slot 1 stream payload");
++	check(sec[299] == 0x5a && sec[300] == 0, "FOO.BIN 300 bytes padded in stream sector");
++	leave_cmd();
++	put_cmd(name, "M:");
++	check(comm_sdc(0xe1, 0, 0, name, 1) == 0, "eject slot 1");
++
++	/* FileAccess 256-byte LSN still works on the stream file. */
++	put_cmd(name, "m:STREAM.BIN");
++	check(comm_sdc(0xe0, 0, 0, name, 1) == 0, "reopen STREAM.BIN for $80");
++	memset(name, 0, sizeof(name));
++	check(comm_sdc(0x80, 0, 0, name, 1) == 0 && name[0] == 0xa0 &&
++	      name[255] == (uint8_t)255, "FileAccess LSN 0 is 256 bytes not 512");
++	put_cmd(name, "M:");
++	(void)comm_sdc(0xe0, 0, 0, name, 1);
++
++	/* LSN past EOF */
++	put_cmd(name, "m:HELLO.TXT");
++	check(comm_sdc(0xe0, 0, 0, name, 1) == 0, "mount HELLO for past-EOF stream");
++	check(stream_start(0x90, 1) < 0, "stream LSN past EOF fails");
++	check(last_status & SDC_FAILED, "stream past EOF FAILED");
++	leave_cmd();
++	put_cmd(name, "M:");
++	(void)comm_sdc(0xe0, 0, 0, name, 1);
++}
++
++static void test_play(void) {
++	uint8_t sec[SDC_STREAM_SIZE];
++	uint8_t got[SDC_STREAM_SIZE * 4];
++	uint8_t pcm[SDC_STREAM_SIZE * 3 + 80];
++	char path[PATH_MAX];
++	size_t i;
++	size_t npcm = sizeof(pcm);
++	size_t nsec;
++	size_t ngot;
++	int asra;
++	unsigned sector;
++
++	for (i = 0; i < npcm; i++) {
++		pcm[i] = (uint8_t)(0x40 + (i & 0x3f));
++	}
++	pcm[0] = 0x11;
++	pcm[1] = 0x22;
++	pcm[511] = 0x33;
++	pcm[512] = 0x44;
++	pcm[1023] = 0x55;
++	pcm[1024] = 0x66;
++	pcm[npcm - 1] = 0x77;
++	if (snprintf(path, sizeof(path), "%s/PLAY.RAW", root_path) >= (int)sizeof(path) ||
++	    write_file(path, pcm, npcm) != 0) {
++		check(0, "write PLAY.RAW");
++		return;
++	}
++
++	/* Play defaults SDC_DriveNumber to 1: $E1 mount, $91 stream, stay in
++	 * command mode (no CommSDC $FF40=0 between mount and $90). */
++	check(open_sdc_file_x_at_start(1, "m:PLAY.RAW") == 1,
++	      "Play OpenSDC_File_X_At_Start $E1/$91 READY");
++	check(play_asra() == 1, "Play ASRA first sector BUSY|READY");
++
++	/* First 512 into buffer 1, then ASRA wait for the next sector (Play). */
++	play_read_512_words(sec);
++	check(sec[0] == 0x11 && sec[1] == 0x22 && sec[511] == 0x33,
++	      "Play first sector 16-bit $FF4A/$FF4B order");
++	check(memcmp(sec, pcm, SDC_STREAM_SIZE) == 0, "Play sector 0 matches host");
++	check(play_asra() == 1, "Play ASRA after sector 0 waits as READY (sector 1)");
++
++	memcpy(got, sec, SDC_STREAM_SIZE);
++	ngot = SDC_STREAM_SIZE;
++
++	/* Interleaved Play pacing: after ~166 dummy samples, blast-read 512
++	 * without a READY wait loop; one ASRA poll afterwards for EOF. */
++	nsec = (npcm + SDC_STREAM_SIZE - 1) / SDC_STREAM_SIZE;
++	for (sector = 1; sector < nsec; sector++) {
++		play_read_512_words(sec);
++		memcpy(got + ngot, sec, SDC_STREAM_SIZE);
++		ngot += SDC_STREAM_SIZE;
++		asra = play_asra();
++		if (sector + 1 < nsec) {
++			check(asra == 1, "Play interleaved poll still BUSY (more sectors)");
++		} else {
++			check(asra == 0, "Play interleaved poll Not Busy after last sector");
++		}
++	}
++	check(ngot >= npcm, "Play consumed at least the file length");
++	check(memcmp(got, pcm, npcm) == 0, "Play concatenated sectors match PLAY.RAW");
++	check(got[npcm] == 0 && got[ngot - 1] == 0, "Play short last sector zero-padded");
++	check(!(sdc_hw_read(&hw, 0x08) & SDC_BUSY), "Play EOF CLR path sees Not Busy");
++	leave_cmd();
++
++	/* BREAK: $D0 then CLR $FF40 (SDCBreak / SDCAudioPlayDone).  $D0 must
++	 * clear BUSY in the command write — Play does not waitForIt. */
++	check(open_sdc_file_x_at_start(1, "m:PLAY.RAW") == 1, "Play reopen for BREAK");
++	play_read_512_words(sec);
++	check(play_asra() == 1, "Play has another sector before BREAK");
++	play_read_512_words(sec);
++	sdc_hw_write(&hw, 0x08, 0xd0);
++	last_status = sdc_hw_read(&hw, 0x08);
++	check(!(last_status & (SDC_BUSY | SDC_FAILED)),
++	      "Play $D0 BREAK is Not Busy without pump");
++	leave_cmd();
++	check(!(sdc_hw_read(&hw, 0x08) & SDC_BUSY), "Play CLR $FF40 after $D0");
++
++	/* Same host file cannot occupy both slots; eject slot 1 first. */
++	{
++		uint8_t name[SDC_BLOCK_SIZE];
++		put_cmd(name, "M:");
++		check(comm_sdc(0xe1, 0, 0, name, 1) == 0, "eject Play slot 1 before slot 0");
++	}
++
++	/* Drive 0 Play path ($E0/$90) — same contract, other slot. */
++	check(open_sdc_file_x_at_start(0, "m:PLAY.RAW") == 1, "Play $E0/$90 READY");
++	play_read_512_words(sec);
++	check(sec[0] == 0x11, "Play slot 0 first sample");
++	sdc_hw_write(&hw, 0x08, 0xd0);
++	leave_cmd();
++
++	/* Eject both slots (Play does not M: eject; FileAccess might next). */
++	{
++		uint8_t name[SDC_BLOCK_SIZE];
++		put_cmd(name, "M:");
++		check(comm_sdc(0xe1, 0, 0, name, 1) == 0, "eject Play slot 1");
++		check(comm_sdc(0xe0, 0, 0, name, 1) == 0, "eject Play slot 0");
++	}
++}
++
++static void test_no_root(void) {
++	uint8_t block[SDC_BLOCK_SIZE];
++	sdc_fs_free(&fs);
++	sdc_fs_init(&fs);
++	check(comm_sdc(0xc0, 'V', 0, NULL, 0) == 0, "VERSION without sdc-root");
++	put_cmd(block, "m:HELLO.TXT");
++	check(comm_sdc(0xe0, 0, 0, block, 1) != 0, "mount without sdc-root fails");
++	check(last_status & SDC_FAILED, "mount without root FAILED");
++	sdc_fs_free(&fs);
++	sdc_fs_init(&fs);
++	check(sdc_fs_set_root(&fs, root_path) == 0, "restore sdc-root");
++}
++
++/* Disk Basic Unravelled / Toolshed / Studio rsdos.rs:
++ * T17 S1 unused, T17 S2 FAT, T17 S3–S11 directory (8×32-byte entries).
++ * First byte $00 = killed (skip); $FF = never used (DIR stops).
++ * A catalog on S2 is invisible to DECB DIR — the "mounted but DIR empty" miss. */
++#define DECB_DSK_BYTES     (35 * 18 * 256)
++#define DECB_FAT_OFF       ((17 * 18 + 1) * 256)
++#define DECB_DIR_OFF       ((17 * 18 + 2) * 256)
++#define DECB_SKEW_DIR_OFF  ((17 * 18 + 1) * 256)
++
++static void decb_put_dirent(uint8_t *dir, int slot, const char *name11,
++			    uint8_t typ, uint8_t asc, uint8_t gran, uint16_t last) {
++	uint8_t *e = dir + slot * 32;
++	memset(e, 0, 32);
++	memcpy(e, name11, 11);
++	e[11] = typ;
++	e[12] = asc;
++	e[13] = gran;
++	e[14] = (uint8_t)(last >> 8);
++	e[15] = (uint8_t)last;
++}
++
++static int write_decb_dsk_layout(const char *path, const char *payload, size_t pay_n,
++				 int dir_on_s3) {
++	uint8_t *img;
++	uint8_t *dir;
++	size_t n = pay_n > 255 ? 255 : pay_n;
++	int rc = -1;
++
++	img = calloc(1, DECB_DSK_BYTES);
++	if (!img) {
++		return -1;
++	}
++	memset(img + DECB_FAT_OFF, 0xff, 256);
++	img[DECB_FAT_OFF + 0] = (uint8_t)(0xc0 | 1);
++	if (dir_on_s3) {
++		dir = img + DECB_DIR_OFF;
++		memset(dir, 0xff, 256);
++	} else {
++		/* Wrong: catalog on the FAT sector (old unit-test layout). */
++		dir = img + DECB_SKEW_DIR_OFF;
++	}
++	decb_put_dirent(dir, 0, "START   BAS", 0, 0xff, 0, (uint16_t)n);
++	memcpy(img, payload, n);
++	if (write_file(path, img, DECB_DSK_BYTES) == 0) {
++		rc = 0;
++	}
++	free(img);
++	return rc;
++}
++
++static int write_decb_dsk(const char *path, const char *payload, size_t pay_n) {
++	return write_decb_dsk_layout(path, payload, pay_n, 1);
++}
++
++static int write_decb_dsk_skewed(const char *path, const char *payload, size_t pay_n) {
++	return write_decb_dsk_layout(path, payload, pay_n, 0);
++}
++
++/* Studio RsdosDisk: unused entries $FF, FAT on S2, catalog on S3, granule 0 at T0 S1. */
++static int write_studio_launch_dsk(const char *path) {
++	static const char start[] = "10 PRINT \"START\"\r";
++	static const char autoexec[] = "10 RUN\"START\"\r";
++	static const char mover[] = "MOVER";
++	uint8_t *img;
++	uint8_t *dir;
++	int rc = -1;
++
++	img = calloc(1, DECB_DSK_BYTES);
++	if (!img) {
++		return -1;
++	}
++	memset(img + DECB_FAT_OFF, 0xff, 256);
++	img[DECB_FAT_OFF + 0] = (uint8_t)(0xc0 | 1);
++	img[DECB_FAT_OFF + 1] = (uint8_t)(0xc0 | 1);
++	img[DECB_FAT_OFF + 2] = (uint8_t)(0xc0 | 1);
++	dir = img + DECB_DIR_OFF;
++	memset(dir, 0xff, 9 * 256);
++	decb_put_dirent(dir, 0, "START   BAS", 0, 0xff, 0, (uint16_t)strlen(start));
++	decb_put_dirent(dir, 1, "AUTOEXECBAS", 0, 0xff, 1, (uint16_t)strlen(autoexec));
++	decb_put_dirent(dir, 2, "MOVER   BIN", 2, 0, 2, (uint16_t)strlen(mover));
++	memcpy(img + 0 * 9 * 256, start, strlen(start));
++	memcpy(img + 1 * 9 * 256, autoexec, strlen(autoexec));
++	memcpy(img + 2 * 9 * 256, mover, strlen(mover));
++	if (write_file(path, img, DECB_DSK_BYTES) == 0) {
++		rc = 0;
++	}
++	free(img);
++	return rc;
++}
++
++static void fdc_latch_drive0(struct sdc_fdc *f) {
++	sdc_fdc_write(f, &fs, 0x00, 0xa9); /* halt + density + motor + drv0 */
++}
++
++static void fdc_restore(struct sdc_fdc *f) {
++	sdc_fdc_write(f, &fs, 0x08, 0x03);
++}
++
++static int fdc_read_sector(struct sdc_fdc *f, uint8_t track, uint8_t sector, uint8_t *buf) {
++	unsigned i;
++	uint8_t st;
++
++	sdc_fdc_write(f, &fs, 0x09, track);
++	sdc_fdc_write(f, &fs, 0x0a, sector);
++	sdc_fdc_write(f, &fs, 0x08, 0x80);
++	st = sdc_fdc_read(f, &fs, 0x08);
++	if (st & SDC_FLP_NOTREADY) {
++		last_status = st;
++		return -1;
++	}
++	if (!(st & SDC_FLP_DRQ)) {
++		last_status = st;
++		return -1;
++	}
++	for (i = 0; i < SDC_BLOCK_SIZE; i++) {
++		buf[i] = sdc_fdc_read(f, &fs, 0x0b);
++	}
++	last_status = sdc_fdc_read(f, &fs, 0x08);
++	return 0;
++}
++
++static void test_dsk_mount_and_fdc(void) {
++	char path[PATH_MAX];
++	const char *bas = "10 PRINT \"OK\"\r";
++	uint8_t block[SDC_BLOCK_SIZE];
++	uint8_t sec[SDC_BLOCK_SIZE];
++	struct sdc_fdc fdc;
++	uint8_t wr[SDC_BLOCK_SIZE];
++
++	if (snprintf(path, sizeof(path), "%s/START.DSK", root_path) >= (int)sizeof(path) ||
++	    write_decb_dsk(path, bas, strlen(bas)) != 0) {
++		check(0, "write START.DSK");
++		return;
++	}
++
++	put_cmd(block, "M:HELLO.TXT");
++	check(comm_sdc(0xe0, 0, 0, block, 1) != 0, "M: of tiny non-DSK fails");
++	check(failed_bits(SDC_ERR_INVALID), "M: HELLO.TXT FAILED|$04 invalid image");
++
++	sdc_fdc_reset(&fdc);
++	fdc_latch_drive0(&fdc);
++	fdc_restore(&fdc);
++	check(sdc_fdc_read(&fdc, &fs, 0x08) & SDC_FLP_NOTREADY,
++	      "FDC restore with nothing mounted is NOTREADY");
++
++	put_cmd(block, "m:START.DSK");
++	check(comm_sdc(0xe0, 0, 0, block, 1) == 0, "m:START.DSK raw mount");
++	sdc_fdc_reset(&fdc);
++	fdc_latch_drive0(&fdc);
++	check(fdc_read_sector(&fdc, 17, 2, sec) != 0, "FDC read of m: raw is not ready");
++	check(last_status & SDC_FLP_NOTREADY, "m: DSK does not enable FDC");
++	put_cmd(block, "M:");
++	(void)comm_sdc(0xe0, 0, 0, block, 1);
++
++	put_cmd(block, "M:START.DSK");
++	check(comm_sdc(0xe0, 0, 0, block, 1) == 0, "M:START.DSK disk-image mount");
++	check(sdc_fs_fdc_ready(&fs, 0), "M: sets fdc_ok on slot 0");
++
++	memset(block, 0, sizeof(block));
++	check(comm_sdc(0x80, 0, 0, block, 1) == 0, "LSN 0 after M: is first sector");
++	check(memcmp(block, bas, strlen(bas)) == 0, "LSN 0 is START.BAS payload");
++
++	sdc_fdc_reset(&fdc);
++	fdc_latch_drive0(&fdc);
++	fdc_restore(&fdc);
++	check(fdc.track == 0, "restore sets track 0");
++	check(!fdc.intrq && !sdc_fdc_want_nmi(&fdc),
++	      "restore does not NMI (DECB polls !BUSY; instant INTRQ aborts DSKCON)");
++	last_status = sdc_fdc_read(&fdc, &fs, 0x08);
++	check(!(last_status & SDC_FLP_BUSY), "restore is not busy");
++	check(!(last_status & SDC_FLP_NOTREADY), "restore with mounted DSK is ready");
++
++	check(fdc_read_sector(&fdc, 17, 3, sec) == 0, "DSKCON read directory T17 S3");
++	check(memcmp(sec, "START   BAS", 11) == 0, "directory entry START.BAS");
++	check(sec[12] == 0xff && sec[13] == 0, "ASCII BASIC granule 0");
++	check(sdc_fdc_want_nmi(&fdc) || !fdc.drq, "sector complete drops DRQ");
++
++	check(fdc_read_sector(&fdc, 0, 1, sec) == 0, "DSKCON read T0 S1 (granule 0)");
++	check(memcmp(sec, bas, strlen(bas)) == 0, "START.BAS payload via FDC CHS");
++
++	check(fdc_read_sector(&fdc, 17, 2, sec) == 0, "read FAT T17 S2");
++	check((sec[0] & 0xc0) == 0xc0, "FAT granule 0 is last granule");
++
++	memset(wr, 0x5a, sizeof(wr));
++	sdc_fdc_write(&fdc, &fs, 0x09, 0);
++	sdc_fdc_write(&fdc, &fs, 0x0a, 2);
++	sdc_fdc_write(&fdc, &fs, 0x08, 0xa0);
++	check(fdc.drq, "write sector presents DRQ");
++	{
++		unsigned i;
++		for (i = 0; i < SDC_BLOCK_SIZE; i++) {
++			sdc_fdc_write(&fdc, &fs, 0x0b, wr[i]);
++		}
++	}
++	check(fdc_read_sector(&fdc, 0, 2, sec) == 0 && sec[0] == 0x5a && sec[255] == 0x5a,
++	      "FDC write sector round-trip");
++
++	put_cmd(block, "M:");
++	check(comm_sdc(0xe0, 0, 0, block, 1) == 0, "eject START.DSK");
++}
++
++static void test_startup_cfg_and_jvc(void) {
++	char path[PATH_MAX];
++	char cfg[PATH_MAX];
++	const char *bas = "10 PRINT \"CFG\"\r";
++	uint8_t *jvc;
++	uint8_t sec[SDC_BLOCK_SIZE];
++	uint8_t block[SDC_BLOCK_SIZE];
++	struct sdc_fdc fdc;
++	struct sdc_fs fs2;
++
++	if (snprintf(path, sizeof(path), "%s/AUTO.DSK", root_path) >= (int)sizeof(path) ||
++	    write_decb_dsk(path, bas, strlen(bas)) != 0) {
++		check(0, "write AUTO.DSK");
++		return;
++	}
++	if (snprintf(cfg, sizeof(cfg), "%s/startup.cfg", root_path) >= (int)sizeof(cfg) ||
++	    write_file(cfg, "D=/\n0=AUTO.DSK\n", strlen("D=/\n0=AUTO.DSK\n")) != 0) {
++		check(0, "write startup.cfg");
++		return;
++	}
++
++	sdc_fs_reset(&fs);
++	check(sdc_fs_apply_startup(&fs) == 0, "apply STARTUP.CFG");
++	check(sdc_fs_fdc_ready(&fs, 0), "startup.cfg 0=AUTO.DSK auto-mounted");
++
++	sdc_fdc_reset(&fdc);
++	fdc_latch_drive0(&fdc);
++	check(fdc_read_sector(&fdc, 17, 3, sec) == 0, "auto-mount directory readable");
++	check(memcmp(sec, "START   BAS", 11) == 0, "auto-mounted DSK has START.BAS");
++	check(fdc_read_sector(&fdc, 0, 1, sec) == 0 && memcmp(sec, bas, strlen(bas)) == 0,
++	      "auto-mounted START.BAS payload");
++
++	put_cmd(block, "M:");
++	(void)comm_sdc(0xe0, 0, 0, block, 1);
++
++	jvc = malloc(2 + DECB_DSK_BYTES);
++	if (!jvc) {
++		check(0, "alloc JVC");
++		return;
++	}
++	jvc[0] = 18;
++	jvc[1] = 1;
++	if (snprintf(path, sizeof(path), "%s/AUTO.DSK", root_path) >= (int)sizeof(path)) {
++		free(jvc);
++		check(0, "AUTO.DSK path");
++		return;
++	}
++	{
++		FILE *fp = fopen(path, "rb");
++		if (!fp || fread(jvc + 2, 1, DECB_DSK_BYTES, fp) != DECB_DSK_BYTES) {
++			if (fp) {
++				fclose(fp);
++			}
++			free(jvc);
++			check(0, "read AUTO.DSK for JVC wrap");
++			return;
++		}
++		fclose(fp);
++	}
++	if (snprintf(path, sizeof(path), "%s/JVC.DSK", root_path) >= (int)sizeof(path) ||
++	    write_file(path, jvc, 2 + DECB_DSK_BYTES) != 0) {
++		free(jvc);
++		check(0, "write JVC.DSK");
++		return;
++	}
++	free(jvc);
++
++	put_cmd(block, "M:JVC.DSK");
++	check(comm_sdc(0xe0, 0, 0, block, 1) == 0, "M: JVC 2-byte header");
++	memset(block, 0, sizeof(block));
++	check(comm_sdc(0x80, 0, 0, block, 1) == 0, "LSN 0 skips JVC header");
++	check(memcmp(block, "10 PRINT", 8) == 0, "JVC LSN 0 is sector data not header");
++	sdc_fdc_reset(&fdc);
++	fdc_latch_drive0(&fdc);
++	check(fdc_read_sector(&fdc, 0, 1, sec) == 0 && memcmp(sec, "10 PRINT", 8) == 0,
++	      "FDC CHS skips JVC header");
++	put_cmd(block, "M:");
++	(void)comm_sdc(0xe0, 0, 0, block, 1);
++
++	/* Hard-reset style: set_root reapplies startup.cfg */
++	sdc_fs_init(&fs2);
++	check(sdc_fs_set_root(&fs2, root_path) == 0, "set_root applies startup.cfg");
++	check(sdc_fs_fdc_ready(&fs2, 0), "set_root auto-mounts AUTO.DSK");
++	sdc_fs_free(&fs2);
++}
++
++/* DECB DSKCON (Unravelled LD7F8): $FF40 density/NMI, Seek $17 polling
++ * !BUSY (not NMI), sector register, $80/$A0, poll DRQ, LDA/STA $FF4B /
++ * STA $FF40 each byte, NMI terminates, ANDA #$7C → DCSTA.
++ * Instant INTRQ before any Type II data is the empty-DIR / ?NE bug.
++ * Instant Seek INTRQ with nmi_enable is the same if NMIFLG is already set. */
++static int decb_dskcon_seek(struct sdc_fdc *f, uint8_t track) {
++	uint8_t st;
++
++	sdc_fdc_write(f, &fs, 0x09, f->track);
++	if (f->track == track) {
++		return 0;
++	}
++	sdc_fdc_write(f, &fs, 0x0b, track);
++	sdc_fdc_write(f, &fs, 0x08, 0x17);
++	if (sdc_fdc_want_nmi(f)) {
++		st = sdc_fdc_read(f, &fs, 0x08);
++		last_status = (uint8_t)(st & 0x7c);
++		return -2; /* Seek NMI: DSKCON would return without Type II */
++	}
++	st = sdc_fdc_read(f, &fs, 0x08);
++	if (st & SDC_FLP_BUSY) {
++		last_status = 0x80;
++		return -1;
++	}
++	return 0;
++}
++
++static int decb_dskcon_read(struct sdc_fdc *f, uint8_t track, uint8_t sector,
++			    uint8_t *buf) {
++	unsigned i;
++	uint8_t st = 0;
++	int y;
++	int rc;
++
++	memset(buf, 0xaa, SDC_BLOCK_SIZE);
++	sdc_fdc_write(f, &fs, 0x00, 0x29); /* motor + density/NMI + drv0 */
++	rc = decb_dskcon_seek(f, track);
++	if (rc == -2) {
++		return last_status == 0 ? 0 : -1;
++	}
++	if (rc != 0) {
++		return -1;
++	}
++	sdc_fdc_write(f, &fs, 0x0a, sector);
++	(void)sdc_fdc_read(f, &fs, 0x08); /* RESET INTRQ (LDA FDCREG) */
++	sdc_fdc_write(f, &fs, 0x08, 0x80);
++
++	if (sdc_fdc_want_nmi(f)) {
++		st = sdc_fdc_read(f, &fs, 0x08);
++		last_status = (uint8_t)(st & 0x7c);
++		return last_status == 0 ? 0 : -1;
++	}
++
++	for (y = 0; y < 4096; y++) {
++		st = sdc_fdc_read(f, &fs, 0x08);
++		if (st & SDC_FLP_DRQ) {
++			break;
++		}
++		if (sdc_fdc_want_nmi(f)) {
++			st = sdc_fdc_read(f, &fs, 0x08);
++			last_status = (uint8_t)(st & 0x7c);
++			return last_status == 0 ? 0 : -1;
++		}
++	}
++	if (!(st & SDC_FLP_DRQ)) {
++		sdc_fdc_write(f, &fs, 0x08, 0xd0);
++		last_status = 0x80;
++		return -1;
++	}
++	for (i = 0; i < SDC_BLOCK_SIZE; i++) {
++		buf[i] = sdc_fdc_read(f, &fs, 0x0b);
++		sdc_fdc_write(f, &fs, 0x00, 0xa9);
++		if (sdc_fdc_want_halt(f)) {
++			last_status = 0x04; /* lost data: HALT froze mid-sector */
++			return -1;
++		}
++	}
++	st = sdc_fdc_read(f, &fs, 0x08);
++	last_status = (uint8_t)(st & 0x7c);
++	return last_status == 0 ? 0 : -1;
++}
++
++static int decb_dskcon_write(struct sdc_fdc *f, uint8_t track, uint8_t sector,
++			     const uint8_t *buf) {
++	unsigned i;
++	uint8_t st = 0;
++	int y;
++	int rc;
++
++	sdc_fdc_write(f, &fs, 0x00, 0x29);
++	rc = decb_dskcon_seek(f, track);
++	if (rc == -2) {
++		return last_status == 0 ? 0 : -1;
++	}
++	if (rc != 0) {
++		return -1;
++	}
++	sdc_fdc_write(f, &fs, 0x0a, sector);
++	(void)sdc_fdc_read(f, &fs, 0x08);
++	sdc_fdc_write(f, &fs, 0x08, 0xa0);
++
++	if (sdc_fdc_want_nmi(f)) {
++		st = sdc_fdc_read(f, &fs, 0x08);
++		last_status = (uint8_t)(st & 0x7c);
++		return last_status == 0 ? 0 : -1;
++	}
++	for (y = 0; y < 4096; y++) {
++		st = sdc_fdc_read(f, &fs, 0x08);
++		if (st & SDC_FLP_DRQ) {
++			break;
++		}
++		if (sdc_fdc_want_nmi(f)) {
++			st = sdc_fdc_read(f, &fs, 0x08);
++			last_status = (uint8_t)(st & 0x7c);
++			return last_status == 0 ? 0 : -1;
++		}
++	}
++	if (!(st & SDC_FLP_DRQ)) {
++		sdc_fdc_write(f, &fs, 0x08, 0xd0);
++		last_status = 0x80;
++		return -1;
++	}
++	for (i = 0; i < SDC_BLOCK_SIZE; i++) {
++		sdc_fdc_write(f, &fs, 0x0b, buf[i]);
++		sdc_fdc_write(f, &fs, 0x00, 0xa9);
++		if (sdc_fdc_want_halt(f)) {
++			last_status = 0x04;
++			return -1;
++		}
++	}
++	st = sdc_fdc_read(f, &fs, 0x08);
++	last_status = (uint8_t)(st & 0x7c);
++	return last_status == 0 ? 0 : -1;
++}
++
++static int host_read_dsk_sector(const char *path, unsigned track,
++				unsigned sector, uint8_t *buf) {
++	FILE *fp;
++	long off = (long)((track * 18u + (sector - 1u)) * 256u);
++
++	fp = fopen(path, "rb");
++	if (!fp) {
++		return -1;
++	}
++	if (fseek(fp, off, SEEK_SET) != 0 ||
++	    fread(buf, 1, SDC_BLOCK_SIZE, fp) != SDC_BLOCK_SIZE) {
++		fclose(fp);
++		return -1;
++	}
++	fclose(fp);
++	return 0;
++}
++
++/* DECB DIR (Unravelled CCA9): start T17 S3, $00 skip killed, $FF stop. */
++static int decb_dir_list(struct sdc_fdc *f, char names[][12], int maxn) {
++	int n = 0;
++	uint8_t sec[SDC_BLOCK_SIZE];
++	unsigned s, e;
++
++	for (s = 3; s <= 11; s++) {
++		if (decb_dskcon_read(f, 17, (uint8_t)s, sec) != 0) {
++			return -1;
++		}
++		for (e = 0; e < 8; e++) {
++			uint8_t *ent = sec + e * 32;
++			if (ent[0] == 0) {
++				continue;
++			}
++			if (ent[0] == 0xff) {
++				return n;
++			}
++			if (n < maxn) {
++				memcpy(names[n], ent, 11);
++				names[n][11] = 0;
++				n++;
++			}
++		}
++	}
++	return n;
++}
++
++static int dir_has(char names[][12], int n, const char *want11) {
++	int i;
++	for (i = 0; i < n; i++) {
++		if (memcmp(names[i], want11, 11) == 0) {
++			return 1;
++		}
++	}
++	return 0;
++}
++
++static void test_mounted_dir_empty_vs_real_layout(void) {
++	char path[PATH_MAX];
++	char names[16][12];
++	uint8_t block[SDC_BLOCK_SIZE];
++	uint8_t sec[SDC_BLOCK_SIZE];
++	struct sdc_fdc fdc;
++	const char *bas = "10 PRINT \"START\"\r";
++	int n;
++
++	/* Old unit-test layout: names on T17 S2. Mount works; DECB DIR is empty. */
++	if (snprintf(path, sizeof(path), "%s/SKEW.DSK", root_path) >= (int)sizeof(path) ||
++	    write_decb_dsk_skewed(path, bas, strlen(bas)) != 0) {
++		check(0, "write SKEW.DSK");
++		return;
++	}
++	put_cmd(block, "M:SKEW.DSK");
++	check(comm_sdc(0xe0, 0, 0, block, 1) == 0, "M: SKEW.DSK (catalog on FAT sector)");
++	check(sdc_fs_fdc_ready(&fs, 0), "skewed DSK still fdc_ok");
++	check(sdc_fs_fdc_read(&fs, 0, 17, 2, 0, sec) == 0 &&
++	      memcmp(sec, "START   BAS", 11) == 0,
++	      "host peek of T17 S2 sees START.BAS (skewed)");
++	check(sdc_fs_fdc_read(&fs, 0, 17, 3, 0, sec) == 0 && sec[0] == 0,
++	      "T17 S3 on skewed DSK is unused zeros");
++	sdc_fdc_reset(&fdc);
++	n = decb_dir_list(&fdc, names, 16);
++	check(n == 0, "DECB DIR of S2-only catalog is empty (mounted but DIR empty)");
++	put_cmd(block, "M:");
++	(void)comm_sdc(0xe0, 0, 0, block, 1);
++
++	/* Correct layout + Studio-style $FF unused entries and several files. */
++	if (snprintf(path, sizeof(path), "%s/LAUNCH.DSK", root_path) >= (int)sizeof(path) ||
++	    write_studio_launch_dsk(path) != 0) {
++		check(0, "write Studio-style LAUNCH.DSK");
++		return;
++	}
++	put_cmd(block, "M:LAUNCH.DSK");
++	check(comm_sdc(0xe0, 0, 0, block, 1) == 0, "M: Studio-style LAUNCH.DSK");
++	sdc_fdc_reset(&fdc);
++	n = decb_dir_list(&fdc, names, 16);
++	check(n == 3, "DECB DIR lists 3 Studio files");
++	check(dir_has(names, n, "START   BAS"), "DIR 0 lists START.BAS");
++	check(dir_has(names, n, "AUTOEXECBAS"), "DIR 0 lists AUTOEXEC.BAS");
++	check(dir_has(names, n, "MOVER   BIN"), "DIR 0 lists MOVER.BIN");
++	check(decb_dskcon_read(&fdc, 0, 1, sec) == 0 && memcmp(sec, "10 PRINT", 8) == 0,
++	      "RUN START.BAS payload is granule 0 / T0 S1");
++	put_cmd(block, "M:");
++	(void)comm_sdc(0xe0, 0, 0, block, 1);
++}
++
++static void test_fdc_host_persist_and_ok_empty_dir(void) {
++	char path[PATH_MAX];
++	char names[16][12];
++	uint8_t block[SDC_BLOCK_SIZE];
++	uint8_t sec[SDC_BLOCK_SIZE];
++	uint8_t host[SDC_BLOCK_SIZE];
++	uint8_t wr[SDC_BLOCK_SIZE];
++	struct sdc_fdc fdc;
++	int n;
++
++	if (snprintf(path, sizeof(path), "%s/PERSIST.DSK", root_path) >= (int)sizeof(path) ||
++	    write_studio_launch_dsk(path) != 0) {
++		check(0, "write persist LAUNCH-layout DSK");
++		return;
++	}
++
++	put_cmd(block, "M:PERSIST.DSK");
++	check(comm_sdc(0xe0, 0, 0, block, 1) == 0, "M: persist Studio DSK");
++	check(sdc_fs_fdc_ready(&fs, 0), "persist DSK fdc_ok");
++	check(host_read_dsk_sector(path, 17, 3, host) == 0 &&
++	      memcmp(host, "START   BAS", 11) == 0,
++	      "independent host fopen sees T17 S3 START.BAS before FDC");
++
++	sdc_fdc_reset(&fdc);
++	n = decb_dir_list(&fdc, names, 16);
++	check(n == 3, "DECB DIR after mount lists 3 files (not status-OK empty)");
++	check(dir_has(names, n, "START   BAS"), "DIR lists START.BAS from host T17 S3");
++
++	/* Status OK / zero DIR / no host mutation: Seek must not NMI. */
++	sdc_fdc_reset(&fdc);
++	sdc_fdc_write(&fdc, &fs, 0x00, 0x29);
++	sdc_fdc_write(&fdc, &fs, 0x0b, 17);
++	sdc_fdc_write(&fdc, &fs, 0x08, 0x17);
++	check(!sdc_fdc_want_nmi(&fdc),
++	      "Seek $17 with nmi_enable does not INTRQ (would blank DIR)");
++	check(!(sdc_fdc_read(&fdc, &fs, 0x08) & SDC_FLP_BUSY), "Seek is not busy");
++	check(fdc.track == 17, "Seek sets track 17");
++
++	memset(wr, 0, sizeof(wr));
++	decb_put_dirent(wr, 0, "HEY     BAS", 0, 0xff, 3, 12);
++	memset(wr + 32, 0xff, SDC_BLOCK_SIZE - 32);
++	sdc_fdc_reset(&fdc);
++	check(decb_dskcon_write(&fdc, 17, 3, wr) == 0, "DSKCON write T17 S3 HEY.BAS");
++	sdc_fs_flush(&fs);
++
++	check(host_read_dsk_sector(path, 17, 3, host) == 0 &&
++	      memcmp(host, "HEY     BAS", 11) == 0,
++	      "host file mutated: HEY.BAS on T17 S3 after SAVE-style write");
++	check(decb_dskcon_read(&fdc, 17, 3, sec) == 0 &&
++	      memcmp(sec, "HEY     BAS", 11) == 0,
++	      "FDC read-back of written directory matches");
++
++	/* DSKINI write-track $F4 fills the track in the same host file. */
++	sdc_fdc_reset(&fdc);
++	sdc_fdc_write(&fdc, &fs, 0x00, 0x29);
++	sdc_fdc_write(&fdc, &fs, 0x09, 0);
++	sdc_fdc_write(&fdc, &fs, 0x08, 0xf4);
++	check(sdc_fdc_want_nmi(&fdc) || fdc.intrq,
++	      "write-track NMIs so DSKINI can leave its HALT loop");
++	last_status = (uint8_t)(sdc_fdc_read(&fdc, &fs, 0x08) & 0x44);
++	check(last_status == 0, "DSKINI ANDA #$44 write-track status is 0");
++	sdc_fs_flush(&fs);
++	check(host_read_dsk_sector(path, 0, 1, host) == 0 && host[0] == 0xff &&
++	      host[255] == 0xff,
++	      "DSKINI write-track persisted $FF fill to host T0 S1");
++
++	put_cmd(block, "M:");
++	(void)comm_sdc(0xe0, 0, 0, block, 1);
++}
++
++static void test_decb_dskcon_and_glen_cfg(void) {
++	char path[PATH_MAX];
++	char cfg[PATH_MAX];
++	char space_root[PATH_MAX];
++	const char *bas = "10 PRINT \"START\"\r";
++	uint8_t sec[SDC_BLOCK_SIZE];
++	uint8_t word[SDC_BLOCK_SIZE];
++	struct sdc_fdc fdc;
++	struct sdc_fs fs_space;
++	unsigned i;
++	/* Glen's host dump: 0=LAUNCH.DSK\r\n */
++	static const unsigned char glen_cfg[] = {
++		0x30, 0x3d, 0x4c, 0x41, 0x55, 0x4e, 0x43, 0x48,
++		0x2e, 0x44, 0x53, 0x4b, 0x0d, 0x0a
++	};
++
++	sdc_fdc_reset(&fdc);
++	fdc_latch_drive0(&fdc);
++	check(decb_dskcon_read(&fdc, 17, 2, sec) != 0,
++	      "DECB DSKCON unmounted times out (?IO), does not NMI-succeed");
++	check(last_status == 0x80, "unmounted DECB DCSTA is $80 not-ready");
++	check(sec[0] == 0xaa, "unmounted DECB did not deliver a fake empty sector");
++
++	if (snprintf(path, sizeof(path), "%s/LAUNCH.DSK", root_path) >= (int)sizeof(path) ||
++	    write_decb_dsk(path, bas, strlen(bas)) != 0) {
++		check(0, "write LAUNCH.DSK");
++		return;
++	}
++	if (snprintf(cfg, sizeof(cfg), "%s/STARTUP.CFG", root_path) >= (int)sizeof(cfg) ||
++	    write_file(cfg, glen_cfg, sizeof(glen_cfg)) != 0) {
++		check(0, "write Glen STARTUP.CFG bytes");
++		return;
++	}
++
++	sdc_fs_reset(&fs);
++	check(sdc_fs_apply_startup(&fs) == 0, "apply Glen STARTUP.CFG 0=LAUNCH.DSK\\r\\n");
++	check(sdc_fs_fdc_ready(&fs, 0), "Glen CFG sets fdc_ok on drive 0");
++
++	sdc_fdc_reset(&fdc);
++	check(decb_dskcon_read(&fdc, 17, 3, sec) == 0, "DECB DSKCON DIR sector after CFG");
++	check(memcmp(sec, "START   BAS", 11) == 0, "DECB DIR lists START.BAS");
++	check(decb_dskcon_read(&fdc, 0, 1, sec) == 0 && memcmp(sec, bas, strlen(bas)) == 0,
++	      "DECB RUN START.BAS payload via FDC");
++
++	/* 16-bit LDU $FF4A / $FF4B while DRQ */
++	sdc_fdc_reset(&fdc);
++	sdc_fdc_write(&fdc, &fs, 0x00, 0xa9);
++	sdc_fdc_write(&fdc, &fs, 0x09, 17);
++	sdc_fdc_write(&fdc, &fs, 0x0a, 3);
++	sdc_fdc_write(&fdc, &fs, 0x08, 0x80);
++	check(sdc_fdc_read(&fdc, &fs, 0x08) & SDC_FLP_DRQ, "16-bit path presents DRQ");
++	for (i = 0; i < SDC_BLOCK_SIZE; i += 2) {
++		word[i] = sdc_fdc_read(&fdc, &fs, 0x0a);
++		word[i + 1] = sdc_fdc_read(&fdc, &fs, 0x0b);
++	}
++	check(memcmp(word, "START   BAS", 11) == 0, "LDU $FF4A directory is START.BAS");
++
++	/* Hard reset unmounts then STARTUP.CFG remounts. */
++	sdc_fs_reset(&fs);
++	check(!sdc_fs_fdc_ready(&fs, 0), "hard reset unmounts");
++	check(sdc_fs_apply_startup(&fs) == 0, "hard reset reapplies Glen CFG");
++	check(sdc_fs_fdc_ready(&fs, 0), "hard reset remounts LAUNCH.DSK FDC");
++
++	/* Path with spaces (Google Drive style sdc-root). */
++	if (snprintf(space_root, sizeof(space_root), "%s/google drive", root_path) >=
++	    (int)sizeof(space_root) || mkdir(space_root, 0755) != 0) {
++		check(0, "mkdir sdc-root with spaces");
++		return;
++	}
++	if (snprintf(path, sizeof(path), "%s/LAUNCH.DSK", space_root) >= (int)sizeof(path) ||
++	    write_decb_dsk(path, bas, strlen(bas)) != 0) {
++		check(0, "LAUNCH.DSK under spaced sdc-root");
++		return;
++	}
++	if (snprintf(cfg, sizeof(cfg), "%s/STARTUP.CFG", space_root) >= (int)sizeof(cfg) ||
++	    write_file(cfg, glen_cfg, sizeof(glen_cfg)) != 0) {
++		check(0, "STARTUP.CFG under spaced sdc-root");
++		return;
++	}
++	sdc_fs_init(&fs_space);
++	check(sdc_fs_set_root(&fs_space, space_root) == 0, "set_root path with spaces");
++	check(sdc_fs_fdc_ready(&fs_space, 0), "spaces in sdc-root still fdc_ok");
++	{
++		uint8_t dirsec[SDC_BLOCK_SIZE];
++		check(sdc_fs_fdc_read(&fs_space, 0, 17, 3, 0, dirsec) == 0 &&
++		      memcmp(dirsec, "START   BAS", 11) == 0,
++		      "directory sector readable from spaced sdc-root");
++	}
++	sdc_fs_free(&fs_space);
++}
++
++/* The ROM uses $82/$A2, not just the unflagged CommSDC examples. These
++ * tests check both slots and host bytes, so successful no-ops cannot pass. */
++static int host_fingerprint(const char *path, uint64_t *hash, unsigned *size) {
++	uint8_t block[4096];
++	FILE *fp = fopen(path, "rb");
++	if (!fp) return -1;
++	*hash = UINT64_C(14695981039346656037);
++	*size = 0;
++	for (;;) {
++		size_t n = fread(block, 1, sizeof(block), fp);
++		for (size_t i = 0; i < n; i++) {
++			*hash ^= block[i];
++			*hash *= UINT64_C(1099511628211);
++		}
++		*size += (unsigned)n;
++		if (n < sizeof(block)) break;
++	}
++	int rc = ferror(fp) ? -1 : 0;
++	fclose(fp);
++	return rc;
++}
++
++static void test_lsn_command_variants(void) {
++	uint8_t block[SDC_BLOCK_SIZE], payload[SDC_BLOCK_SIZE], actual[SDC_BLOCK_SIZE];
++	char path[PATH_MAX], name[32], command[40];
++	unsigned geometry, drive;
++
++	for (geometry = 0; geometry < 3; geometry++) {
++		unsigned header = geometry == 0 ? 0 : geometry == 1 ? 2 : 1;
++		unsigned sectors = geometry == 0 ? 630 : geometry == 1 ? 1260 : 1440;
++		unsigned physical = geometry == 1 ? 36 : 18;
++		unsigned size = header + sectors * SDC_BLOCK_SIZE;
++		uint8_t *image = malloc(size);
++		if (!check(image != NULL, "allocate LSN variant disk")) return;
++		for (drive = 0; drive < 2; drive++) {
++			memset(image, 0, size);
++			if (header) image[0] = 18;
++			if (header == 2) image[1] = 2;
++			for (unsigned sector = 0; sector < sectors; sector++) {
++				memset(image + header + sector * SDC_BLOCK_SIZE,
++				       (uint8_t)(sector ^ (drive * 0x80)), SDC_BLOCK_SIZE);
++			}
++			snprintf(name, sizeof(name), "VAR%u%u.DSK", geometry, drive);
++			snprintf(path, sizeof(path), "%s/%s", root_path, name);
++			check(write_file(path, image, size) == 0, "create LSN variant disk");
++			snprintf(command, sizeof(command), "M:%s", name);
++			put_cmd(block, command);
++			check(comm_sdc((uint8_t)(0xe0 | drive), 0, 0, block, 1) == 0,
++			      "mount LSN variant disk in requested slot");
++			check(fs.slot[drive].sides == (geometry == 1 ? 2 : 1),
++			      "single/double-sided and one-byte JVC geometry");
++		}
++		free(image);
++
++		for (drive = 0; drive < 2; drive++) {
++			uint8_t read_cmd = (uint8_t)(0x82 | drive);
++			uint8_t write_cmd = (uint8_t)(0xa2 | drive);
++			memset(payload, (uint8_t)(physical ^ (drive * 0x80)), sizeof(payload));
++			memset(block, 0xEE, sizeof(block));
++			check(comm_sdc(read_cmd, 0, 18, block, 1) == 0 &&
++			      memcmp(block, payload, sizeof(block)) == 0,
++			      "$82/$83 read complete sector with single-sided LSN translation");
++			for (unsigned i = 0; i < sizeof(payload); i++)
++				payload[i] = (uint8_t)(i * 17 + drive * 31 + geometry * 7);
++			check(comm_sdc(write_cmd, 0, 18, payload, 1) == 0,
++			      "$A2/$A3 accepts complete sector");
++			memset(block, 0xEE, sizeof(block));
++			check(comm_sdc(read_cmd, 0, 18, block, 1) == 0 &&
++			      memcmp(block, payload, sizeof(block)) == 0,
++			      "$A2/$A3 data reads back through $82/$83");
++
++			snprintf(path, sizeof(path), "%s/VAR%u%u.DSK", root_path, geometry, drive);
++			FILE *fp = fopen(path, "rb");
++			int persisted = fp && fseek(fp, (long)(header + physical * SDC_BLOCK_SIZE), SEEK_SET) == 0 &&
++				fread(actual, 1, sizeof(actual), fp) == sizeof(actual) &&
++				memcmp(actual, payload, sizeof(actual)) == 0;
++			check(persisted, "$A2/$A3 persists exact bytes at physical host offset");
++			if (fp) {
++				if (geometry == 1) {
++					check(fseek(fp, header + 18 * SDC_BLOCK_SIZE, SEEK_SET) == 0 &&
++					      fread(actual, 1, sizeof(actual), fp) == sizeof(actual) &&
++					      actual[0] == (uint8_t)(18 ^ (drive * 0x80)) &&
++					      actual[255] == actual[0],
++					      "single-sided LSN write does not overwrite side 1 of prior track");
++				}
++				fclose(fp);
++			}
++
++			/* $84/$85: physical LSN. $86/$87: translated LSN. Both
++			 * consume exactly 256 FF4B reads; FF4A is not a data port. */
++			for (unsigned single = 0; single < 2; single++) {
++				unsigned lsn = single ? 18 : physical;
++				sdc_hw_write(&hw, 0, SDC_CMDMODE);
++				sdc_hw_write(&hw, 9, 0);
++				sdc_hw_write(&hw, 10, (uint8_t)(lsn >> 8));
++				sdc_hw_write(&hw, 11, (uint8_t)lsn);
++				sdc_hw_write(&hw, 8, (uint8_t)(0x84 | (single << 1) | drive));
++				pump();
++				check(wait_for_it() == 1, "$84-$87 provides READY data");
++				int port_ok = 1;
++				for (unsigned i = 0; i < sizeof(block); i++) {
++					unsigned before = hw.xfer_index;
++					(void)sdc_hw_read(&hw, 10);
++					port_ok &= hw.xfer_index == before;
++					block[i] = sdc_hw_read(&hw, 11);
++				}
++				check(port_ok && memcmp(block, payload, sizeof(block)) == 0,
++				      "$84-$87 byte port preserves all sector bytes and ignores FF4A reads");
++				check(sdc_hw_read(&hw, 8) == 0, "byte sector completes on final byte");
++				leave_cmd();
++			}
++			memset(block, 0, sizeof(block));
++			check(comm_sdc(read_cmd, 0, 18, block, 1) == 0 &&
++			      memcmp(block, payload, sizeof(block)) == 0,
++			      "word transfer restored after byte-mode command");
++			check(comm_sdc(read_cmd, 0, (uint16_t)sectors, block, 1) != 0 &&
++			      (last_status & SDC_FAILED),
++			      "$82/$83 beyond the mounted image reports failure");
++			uint64_t before_hash, after_hash;
++			unsigned before_size, after_size;
++			int before_ok = host_fingerprint(path, &before_hash, &before_size) == 0;
++			check(comm_sdc(write_cmd, 0, (uint16_t)sectors, payload, 1) != 0 &&
++			      (last_status & SDC_FAILED),
++			      "$A2/$A3 beyond the mounted image reports failure");
++			check(before_ok && host_fingerprint(path, &after_hash, &after_size) == 0 &&
++			      before_hash == after_hash && before_size == after_size && after_size == size,
++			      "rejected disk write preserves every host byte and image length");
++		}
++		put_cmd(block, "M:");
++		check(comm_sdc(0xe0, 0, 0, block, 1) == 0, "eject variant drive 0");
++		check(comm_sdc(0xe1, 0, 0, block, 1) == 0, "eject variant drive 1");
++	}
++	check(comm_sdc(0x82, 0, 18, block, 1) != 0, "$82 with no mounted disk fails");
++	check(comm_sdc(0x83, 0, 18, block, 1) != 0, "$83 with no mounted disk fails");
++	check(comm_sdc(0xa2, 0, 18, block, 1) != 0, "$A2 with no mounted disk fails");
++	check(comm_sdc(0xa3, 0, 18, block, 1) != 0, "$A3 with no mounted disk fails");
++	check(comm_sdc(0x88, 0, 0, block, 1) != 0 && (last_status & SDC_FAILED),
++	      "unsupported read opcode fails instead of fake success");
++	check(comm_sdc(0xa4, 0, 0, block, 1) != 0 && (last_status & SDC_FAILED),
++	      "unsupported write opcode fails instead of discarding data successfully");
++}
++
++static void test_invalid_jvc_geometry(void) {
++	static const uint8_t bad[][3] = {{17, 1, 1}, {18, 0, 1}, {18, 3, 1}, {18, 1, 2}};
++	unsigned size = 3 + DECB_DSK_BYTES;
++	uint8_t *image = calloc(1, size);
++	uint8_t block[SDC_BLOCK_SIZE];
++	char path[PATH_MAX];
++	if (!check(image != NULL, "allocate invalid JVC fixture")) return;
++	snprintf(path, sizeof(path), "%s/BADGEOM.DSK", root_path);
++	for (unsigned i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
++		memcpy(image, bad[i], sizeof(bad[i]));
++		check(write_file(path, image, size) == 0, "write unsupported JVC geometry");
++		put_cmd(block, "M:BADGEOM.DSK");
++		check(comm_sdc(0xe0, 0, 0, block, 1) != 0 && failed_bits(SDC_ERR_INVALID),
++		      "unsupported JVC sectors/sides/sector-size rejected");
++	}
++	free(image);
++}
++
++int main(void) {
++	char tmpl[] = "/tmp/cocosdc-fs-XXXXXX";
++	char path[PATH_MAX];
++	char hello[] = "Hello from sdc-root via m: raw blocks.";
++	char *root;
++	char foo[300];
++
++	root = mkdtemp(tmpl);
++	if (!root) {
++		perror("mkdtemp");
++		return 1;
++	}
++	snprintf(root_path, sizeof(root_path), "%s", root);
++
++	snprintf(path, sizeof(path), "%s/HELLO.TXT", root);
++	if (write_file(path, hello, sizeof(hello)) != 0) {
++		fprintf(stderr, "FAIL: write HELLO.TXT\n");
++		rm_path(root);
++		return 1;
++	}
++	snprintf(path, sizeof(path), "%s/GAMES", root);
++	if (mkdir(path, 0755) != 0) {
++		fprintf(stderr, "FAIL: mkdir GAMES\n");
++		rm_path(root);
++		return 1;
++	}
++	memset(foo, 0x5a, sizeof(foo));
++	foo[0] = 'F';
++	foo[1] = 'O';
++	foo[2] = 'O';
++	snprintf(path, sizeof(path), "%s/GAMES/FOO.BIN", root);
++	if (write_file(path, foo, sizeof(foo)) != 0) {
++		fprintf(stderr, "FAIL: write FOO.BIN\n");
++		rm_path(root);
++		return 1;
++	}
++
++	sdc_hw_reset(&hw);
++	sdc_fs_init(&fs);
++	if (sdc_fs_set_root(&fs, root) != 0) {
++		fprintf(stderr, "FAIL: set_root\n");
++		sdc_fs_free(&fs);
++		rm_path(root);
++		return 1;
++	}
++
++	test_version_reset();
++	test_missing_and_eject();
++	test_mount_read_info(hello, sizeof(hello));
++	test_case_partial_and_cwd();
++	test_create_write_lsn_latch();
++	test_slots_inuse();
++	test_dir_listing(hello, sizeof(hello));
++	test_mkdir_delete();
++	test_escape();
++	test_stream();
++	test_play();
++	test_dsk_mount_and_fdc();
++	test_startup_cfg_and_jvc();
++	test_decb_dskcon_and_glen_cfg();
++	test_mounted_dir_empty_vs_real_layout();
++	test_fdc_host_persist_and_ok_empty_dir();
++	test_lsn_command_variants();
++	test_invalid_jvc_geometry();
++	test_no_root();
++
++	sdc_fs_free(&fs);
++	rm_path(root);
++
++	if (nfail) {
++		fprintf(stderr, "%d/%d check(s) failed\n", nfail, ncheck);
++		return 1;
++	}
++	printf("cocosdc_fs: %d checks ok (mount/dir/LSN R/W/stream 512/Play/FDC DSK/startup.cfg/DECB DSKCON/DIR layout/host persist)\n", ncheck);
++	return 0;
++}
+diff --git a/tools/cocosdc_hw_test.c b/tools/cocosdc_hw_test.c
+new file mode 100644
+index 00000000..263af698
+--- /dev/null
++++ b/tools/cocosdc_hw_test.c
+@@ -0,0 +1,305 @@
++/* Host-side CommSDC wait-loop against src/cocosdc_hw.h.
++ * Compile (no XRoar deps):
++ *   cc -std=c11 -Wall -Werror -I src -o /tmp/cocosdc_hw_test tools/cocosdc_hw_test.c
++ */
++#include <stdio.h>
++#include <stdint.h>
++#include <string.h>
++
++#include "cocosdc_hw.h"
++
++#define BUSY   SDC_BUSY
++#define READY  SDC_READY
++#define FAILED SDC_FAILED
++
++/* Mirror of waitForIt in SDC_Comm.asm, without the timeout spin. */
++static int wait_for_it(struct sdc_hw *h) {
++	uint8_t b = sdc_hw_read(h, 0x08);
++	if (b & FAILED) {
++		return -1;
++	}
++	if (!(b & BUSY)) {
++		return 0; /* Not Busy: Z set */
++	}
++	if (b & READY) {
++		return 1; /* Ready: C clear, Z clear */
++	}
++	return -1; /* would time out */
++}
++
++/* Cart layer: VERSION/$1C, otherwise succeed (no payload). */
++static void pump(struct sdc_hw *h) {
++	if (!sdc_hw_take_builtin(h) && h->cmd_ready) {
++		sdc_hw_succeed(h);
++	}
++}
++
++/* Minimal CommSDC: A=cmd, B=param1, X=param2/3, optional 256-byte buffer. */
++static int comm_sdc(struct sdc_hw *h, uint8_t cmd, uint8_t b, uint16_t x,
++		    uint8_t *buf, int have_buf) {
++	sdc_hw_write(h, 0x00, SDC_CMDMODE);
++	sdc_hw_write(h, 0x09, b);
++	sdc_hw_write(h, 0x0a, (uint8_t)(x >> 8));
++	sdc_hw_write(h, 0x0b, (uint8_t)(x & 0xff));
++	if (wait_for_it(h) < 0) {
++		sdc_hw_write(h, 0x00, 0);
++		return -1;
++	}
++	sdc_hw_write(h, 0x08, cmd);
++	pump(h);
++	if (cmd & 0x20) {
++		if (wait_for_it(h) != 1) {
++			sdc_hw_write(h, 0x00, 0);
++			return -1;
++		}
++		for (int i = 0; i < SDC_BLOCK_SIZE; i++) {
++			uint8_t v = buf ? buf[i] : 0;
++			sdc_hw_write(h, (i & 1) ? 0x0b : 0x0a, v);
++		}
++		pump(h);
++		if (wait_for_it(h) < 0) {
++			sdc_hw_write(h, 0x00, 0);
++			return -1;
++		}
++		if (sdc_hw_read(h, 0x08) & BUSY) {
++			sdc_hw_write(h, 0x00, 0);
++			return -1;
++		}
++	} else {
++		int w = wait_for_it(h);
++		if (w < 0) {
++			sdc_hw_write(h, 0x00, 0);
++			return -1;
++		}
++		if (w == 1 && have_buf && buf) {
++			for (int i = 0; i < SDC_BLOCK_SIZE; i++) {
++				buf[i] = sdc_hw_read(h, (i & 1) ? 0x0b : 0x0a);
++			}
++		}
++	}
++	sdc_hw_write(h, 0x00, 0);
++	return 0;
++}
++
++static int fail(const char *msg) {
++	fprintf(stderr, "FAIL: %s\n", msg);
++	return 1;
++}
++
++int main(void) {
++	struct sdc_hw h;
++	uint8_t block[SDC_BLOCK_SIZE];
++	int nfail = 0;
++
++	sdc_hw_reset(&h);
++
++	/* Probe: command mode, not busy, not failed. */
++	sdc_hw_write(&h, 0x00, SDC_CMDMODE);
++	if (sdc_hw_read(&h, 0x08) & (BUSY | FAILED)) {
++		nfail += fail("probe status busy/failed after $43");
++	}
++
++	/* VERSION: $C0, 'V' — result in $FF4A/$FF4B after leaving command mode. */
++	if (comm_sdc(&h, 0xc0, 'V', 0, NULL, 0) != 0) {
++		nfail += fail("VERSION CommSDC hung or failed");
++	}
++	{
++		uint8_t hi = sdc_hw_read(&h, 0x0a);
++		uint8_t lo = sdc_hw_read(&h, 0x0b);
++		if (hi != 0x01 || lo != 0x27) {
++			fprintf(stderr, "FAIL: VERSION %02x%02x, expected 0127\n", hi, lo);
++			nfail++;
++		}
++		if (sdc_hw_read(&h, 0x08) & BUSY) {
++			nfail += fail("VERSION left BUSY set");
++		}
++	}
++
++	/* Mount $E0: bit 5 set, 256-byte name, then not busy. */
++	memset(block, 0, sizeof(block));
++	memcpy(block, "m:HELLO.TXT", 12);
++	if (comm_sdc(&h, 0xe0, 0, 0, block, 1) != 0) {
++		nfail += fail("MOUNT CommSDC hung or failed");
++	}
++	if (sdc_hw_read(&h, 0x08) & BUSY) {
++		nfail += fail("MOUNT left BUSY set");
++	}
++	if (memcmp(h.block, "m:HELLO.TXT", 12) != 0) {
++		nfail += fail("MOUNT payload not latched");
++	}
++
++	/* Reset $1C: 'PM' in param 1/2. */
++	if (comm_sdc(&h, 0x1c, 0xaa, 0x5500, NULL, 0) != 0) {
++		nfail += fail("RESET CommSDC hung or failed");
++	}
++	if (sdc_hw_read(&h, 0x09) != 'P' || sdc_hw_read(&h, 0x0a) != 'M') {
++		nfail += fail("RESET did not return PM");
++	}
++
++	/* $FF40 is not an SDC data register decoder miss. */
++	if (sdc_hw_reg(0xff40) != 0x00 || sdc_hw_reg(0xff48) != 0x08 ||
++	    sdc_hw_reg(0xff4b) != 0x0b || sdc_hw_reg(0xff00) != -1) {
++		nfail += fail("address decode");
++	}
++
++	/* Becker off: $FF41 unused, $FF42/$FF43 flash, SDC registers stay SDC.
++	 * Becker on: $FF41/$FF42 (and RS-DOS mirrors $FF45/$FF46) are Becker;
++	 * $FF42 wins over flash data; $FF43 stays flash; $FF40/$FF48–$FF4B
++	 * stay SDC even though $FF49/$FF4A share Becker's low address bits. */
++	{
++		static const struct {
++			uint16_t A;
++			int becker;
++			int cls;
++		} map[] = {
++			{ 0xff40, 0, COCOSDC_P2_SDC },
++			{ 0xff41, 0, COCOSDC_P2_OTHER },
++			{ 0xff42, 0, COCOSDC_P2_FLASH },
++			{ 0xff43, 0, COCOSDC_P2_FLASH },
++			{ 0xff45, 0, COCOSDC_P2_OTHER },
++			{ 0xff46, 0, COCOSDC_P2_OTHER },
++			{ 0xff48, 0, COCOSDC_P2_SDC },
++			{ 0xff49, 0, COCOSDC_P2_SDC },
++			{ 0xff4a, 0, COCOSDC_P2_SDC },
++			{ 0xff4b, 0, COCOSDC_P2_SDC },
++			{ 0xff40, 1, COCOSDC_P2_SDC },
++			{ 0xff41, 1, COCOSDC_P2_BECKER_STATUS },
++			{ 0xff42, 1, COCOSDC_P2_BECKER_DATA },
++			{ 0xff43, 1, COCOSDC_P2_FLASH },
++			{ 0xff45, 1, COCOSDC_P2_BECKER_STATUS },
++			{ 0xff46, 1, COCOSDC_P2_BECKER_DATA },
++			{ 0xff48, 1, COCOSDC_P2_SDC },
++			{ 0xff49, 1, COCOSDC_P2_SDC },
++			{ 0xff4a, 1, COCOSDC_P2_SDC },
++			{ 0xff4b, 1, COCOSDC_P2_SDC },
++			{ 0xff51, 1, COCOSDC_P2_OTHER },
++			{ 0xff52, 1, COCOSDC_P2_OTHER },
++		};
++		unsigned i;
++		for (i = 0; i < sizeof(map) / sizeof(map[0]); i++) {
++			int got = cocosdc_p2_class(map[i].A, map[i].becker);
++			if (got != map[i].cls) {
++				fprintf(stderr,
++					"FAIL: P2 $%04X becker=%d class %d, expected %d\n",
++					map[i].A, map[i].becker, got, map[i].cls);
++				nfail++;
++			}
++		}
++	}
++
++	/* LSN is latched at command write; $FF4A/$FF4B then carry the data block. */
++	{
++		uint8_t fill[SDC_BLOCK_SIZE];
++		memset(fill, 0x3c, sizeof(fill));
++		if (comm_sdc(&h, 0xa0, 0x00, 0x0102, fill, 1) != 0) {
++			nfail += fail("write-LSN latch transfer hung");
++		}
++		if (h.latched_preg[0] != 0x00 || h.latched_preg[1] != 0x01 ||
++		    h.latched_preg[2] != 0x02) {
++			nfail += fail("LSN not latched across 256-byte data port");
++		}
++		if (h.preg[1] == 0x01 && h.preg[2] == 0x02) {
++			nfail += fail("data port should overwrite preg 2/3");
++		}
++	}
++
++	/* 256-byte RX: READY, then not busy after the last DATREG read. */
++	{
++		uint8_t out[SDC_BLOCK_SIZE];
++		memset(h.block, 0xa5, SDC_BLOCK_SIZE);
++		h.block[0] = 0x11;
++		h.block[255] = 0x22;
++		sdc_hw_start_rx(&h);
++		if (wait_for_it(&h) != 1) {
++			nfail += fail("RX did not set READY");
++		}
++		for (int i = 0; i < SDC_BLOCK_SIZE; i++) {
++			out[i] = sdc_hw_read(&h, (i & 1) ? 0x0b : 0x0a);
++		}
++		if (out[0] != 0x11 || out[255] != 0x22 || out[1] != 0xa5) {
++			nfail += fail("RX payload");
++		}
++		if (sdc_hw_read(&h, 0x08) & BUSY) {
++			nfail += fail("RX left BUSY set");
++		}
++	}
++
++	/* 512-byte stream sector: READY for 512 DATREG reads, then BUSY
++	 * without READY so the cart can refill (BIGLOADM / StreamFile). */
++	{
++		uint8_t out[SDC_STREAM_SIZE];
++		memset(h.block, 0x5a, SDC_STREAM_SIZE);
++		h.block[0] = 0x01;
++		h.block[1] = 0x02;
++		h.block[511] = 0xfe;
++		sdc_hw_start_stream_rx(&h);
++		if (wait_for_it(&h) != 1) {
++			nfail += fail("stream RX did not set READY");
++		}
++		for (int i = 0; i < SDC_STREAM_SIZE; i++) {
++			out[i] = sdc_hw_read(&h, (i & 1) ? 0x0b : 0x0a);
++		}
++		if (out[0] != 0x01 || out[1] != 0x02 || out[511] != 0xfe ||
++		    out[2] != 0x5a) {
++			nfail += fail("stream RX payload");
++		}
++		if (!h.cmd_ready || !h.streaming) {
++			nfail += fail("stream sector did not request refill");
++		}
++		if ((sdc_hw_read(&h, 0x08) & (BUSY | READY)) != BUSY) {
++			nfail += fail("stream sector end is BUSY without READY");
++		}
++		sdc_hw_succeed(&h);
++		if (h.streaming || (sdc_hw_read(&h, 0x08) & BUSY)) {
++			nfail += fail("stream succeed did not clear BUSY");
++		}
++	}
++
++	/* Play.asm: LDA $FF48 / ASRA / LBCC eof / BEQ wait.
++	 * BUSY only -> wait; BUSY|READY -> proceed; not busy -> EOF. */
++	{
++		uint8_t st;
++
++		sdc_hw_write(&h, 0x00, SDC_CMDMODE);
++		sdc_hw_start_stream_rx(&h);
++		st = sdc_hw_read(&h, 0x08);
++		if ((st & (BUSY | READY)) != (BUSY | READY)) {
++			nfail += fail("Play first poll expected BUSY|READY");
++		}
++		/* ASRA of $03: carry set (BUSY), result $01 (not Z) -> proceed */
++		if (!(st & BUSY) || !(st & READY)) {
++			nfail += fail("Play ASRA would not proceed on first sector");
++		}
++		/* Drain one sector so READY drops (BUSY remains, cmd_ready). */
++		for (int i = 0; i < SDC_STREAM_SIZE; i++) {
++			(void)sdc_hw_read(&h, (i & 1) ? 0x0b : 0x0a);
++		}
++		st = sdc_hw_read(&h, 0x08);
++		if ((st & (BUSY | READY)) != BUSY) {
++			nfail += fail("Play ASRA wait: BUSY without READY between sectors");
++		}
++		/* $D0 completes in the $FF48 write (Play BREAK does not pump). */
++		sdc_hw_write(&h, 0x08, 0xd0);
++		if (h.cmd_ready || h.streaming || (sdc_hw_read(&h, 0x08) & BUSY)) {
++			nfail += fail("Play $D0 abort left BUSY or cmd_ready");
++		}
++		if (h.cmd != 0xd0) {
++			nfail += fail("Play $D0 did not latch command");
++		}
++		sdc_hw_write(&h, 0x00, 0);
++	}
++
++	/* FAILED is sticky for waitForIt (bmi). */
++	sdc_hw_fail(&h, SDC_ERR_NOTFOUND);
++	if (wait_for_it(&h) >= 0 || !(sdc_hw_read(&h, 0x08) & FAILED) ||
++	    !(sdc_hw_read(&h, 0x08) & SDC_ERR_NOTFOUND)) {
++		nfail += fail("FAILED|$10 waitForIt");
++	}
++
++	if (nfail) {
++		fprintf(stderr, "%d test(s) failed\n", nfail);
++		return 1;
++	}
++		puts("cocosdc_hw: CommSDC probe/VERSION/MOUNT/RESET/latch/RX/stream-sector/Play-abort/becker-decode ok");
++	return 0;
++}
+diff --git a/tools/cocosdc_io_error_test.c b/tools/cocosdc_io_error_test.c
+new file mode 100644
+index 00000000..182cf0bb
+--- /dev/null
++++ b/tools/cocosdc_io_error_test.c
+@@ -0,0 +1,125 @@
++/* Sector-write completion must include the buffered host I/O result.
++ * Include the implementation with two portable test-only wrappers; no
++ * platform-specific FILE callbacks or production fault hooks are needed.
++ */
++#define _DEFAULT_SOURCE
++
++#include <errno.h>
++#include <stdio.h>
++#include <string.h>
++#include <unistd.h>
++
++static int test_fflush(FILE *fp);
++static int test_fsync(int fd);
++
++#define fflush test_fflush
++#define fsync test_fsync
++#include "../src/cocosdc_fs.c"
++#undef fflush
++#undef fsync
++
++enum fault_kind { NO_FAULT, FLUSH_FAILURE, SYNC_FAILURE };
++static enum fault_kind fault;
++static unsigned flush_calls;
++static unsigned sync_calls;
++static unsigned checks;
++static unsigned failures;
++
++static int test_fflush(FILE *fp) {
++	flush_calls++;
++	if (fault == FLUSH_FAILURE) {
++		errno = ENOSPC;
++		return EOF;
++	}
++	return fflush(fp);
++}
++
++static int test_fsync(int fd) {
++	sync_calls++;
++	if (fault == SYNC_FAILURE) {
++		errno = EIO;
++		return -1;
++	}
++	return fsync(fd);
++}
++
++static void check(int condition, const char *path, enum fault_kind injected,
++		  const char *message) {
++	checks++;
++	if (!condition) {
++		fprintf(stderr, "FAIL: %s fault=%d: %s\n", path, injected, message);
++		failures++;
++	}
++}
++
++static void run_case(int fdc, enum fault_kind injected) {
++	const char *path = fdc ? "FDC write" : "MCU $A0 write";
++	struct sdc_fs fs = {0};
++	struct sdc_hw hw;
++	uint8_t before[SDC_BLOCK_SIZE] = {0};
++	uint8_t written[SDC_BLOCK_SIZE];
++	uint8_t readback[SDC_BLOCK_SIZE];
++	FILE *fp = tmpfile();
++	if (!fp) {
++		perror("tmpfile");
++		failures++;
++		return;
++	}
++	if (fwrite(before, 1, sizeof(before), fp) != sizeof(before) || fflush(fp)) {
++		perror("initialize test sector");
++		fclose(fp);
++		failures++;
++		return;
++	}
++	fs.slot[0].fp = fp;
++	fs.slot[0].writable = 1;
++	fs.slot[0].fdc_ok = 1;
++	fs.slot[0].spt = SDC_FLOPPY_SPT;
++	fs.slot[0].sides = 1;
++	fs.slot[0].fdc_sectors = 1;
++	memset(written, 0xA5, sizeof(written));
++	fault = injected;
++	flush_calls = 0;
++	sync_calls = 0;
++	if (fdc) {
++		int rc = sdc_fs_fdc_write(&fs, 0, 0, 1, 0, written);
++		check(rc == (injected == NO_FAULT ? SDC_FDC_OK : SDC_FDC_IO),
++		      path, injected, "completion reports the host I/O failure");
++	} else {
++		sdc_hw_reset(&hw);
++		hw.cmd = 0xA0;
++		hw.cmd_ready = true;
++		hw.status = SDC_BUSY;
++		memcpy(hw.block, written, sizeof(written));
++		sdc_fs_execute(&fs, &hw);
++		check(hw.status == (injected == NO_FAULT ? 0 : SDC_FAILED | SDC_ERR_MISC),
++		      path, injected, "completion reports the host I/O failure");
++		check(hw.completed && !hw.cmd_ready && hw.xfer == SDC_XFER_NONE,
++		      path, injected, "failure terminates the command without pending transfer");
++	}
++	check(flush_calls == 1, path, injected, "write reaches the flush boundary");
++	check(sync_calls == (injected == FLUSH_FAILURE ? 0u : 1u),
++	      path, injected, "failed flush stops before sync; other writes reach sync");
++	if (injected == NO_FAULT) {
++		check(fseek(fp, 0, SEEK_SET) == 0 &&
++		      fread(readback, 1, sizeof(readback), fp) == sizeof(readback) &&
++		      memcmp(readback, written, sizeof(written)) == 0,
++		      path, injected, "successful control persists all 256 bytes");
++	}
++	fault = NO_FAULT;
++	fclose(fp);
++}
++
++int main(void) {
++	for (int fdc = 0; fdc <= 1; fdc++) {
++		run_case(fdc, NO_FAULT);
++		run_case(fdc, FLUSH_FAILURE);
++		run_case(fdc, SYNC_FAILURE);
++	}
++	if (failures) {
++		fprintf(stderr, "cocosdc_io_error: %u/%u checks failed\n", failures, checks);
++		return 1;
++	}
++	printf("cocosdc_io_error: %u checks ok (MCU/FDC success, fflush and fsync failures)\n", checks);
++	return 0;
++}
+diff --git a/tools/run-cocosdc-tests.sh b/tools/run-cocosdc-tests.sh
+new file mode 100755
+index 00000000..a0eee25e
+--- /dev/null
++++ b/tools/run-cocosdc-tests.sh
+@@ -0,0 +1,40 @@
++#!/bin/sh
++# Compile and run CoCoSDC host-side tests (register engine + temp sdc-root + CRC lists).
++# No XRoar, SDL, autotools, or CoCo ROMs required.
++set -eu
++
++root=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
++cc=${CC:-cc}
++cflags="-std=c11 -Wall -Werror"
++tmp=$(mktemp -d)
++trap 'rm -rf "$tmp"' EXIT
++
++echo "==> cocosdc_hw_test (CommSDC wait-loop)"
++$cc $cflags -I"$root/src" -o "$tmp/cocosdc_hw_test" \
++	"$root/tools/cocosdc_hw_test.c"
++"$tmp/cocosdc_hw_test"
++
++echo "==> decb_bin_test (DECB/DragonDOS preamble parse + RAM poke)"
++$cc $cflags -I"$root" -I"$root/src" -o "$tmp/decb_bin_test" \
++	"$root/tools/decb_bin_test.c" "$root/src/decb_bin.c"
++"$tmp/decb_bin_test"
++
++echo "==> cocosdc_fs_test (mount/dir/LSN/stream/Play/FDC/startup.cfg against temp sdc-root)"
++$cc $cflags -I"$root" -I"$root/src" -o "$tmp/cocosdc_fs_test" \
++	"$root/tools/cocosdc_fs_test.c" "$root/src/cocosdc_fs.c" "$root/src/cocosdc_fdc.c"
++"$tmp/cocosdc_fs_test"
++
++echo "==> cocosdc_io_error_test (MCU/FDC flush and sync failure reporting)"
++$cc $cflags -I"$root" -I"$root/src" -o "$tmp/cocosdc_io_error_test" \
++	"$root/tools/cocosdc_io_error_test.c"
++"$tmp/cocosdc_io_error_test"
++
++echo "==> crclist_match_test (NTSC Super ECB 0xb4c88d6c vs @coco3)"
++$cc $cflags -DHAVE_REGEX_H -I"$root" -I"$root/src" -I"$root/portalib" -o "$tmp/crclist_match_test" \
++	"$root/tools/crclist_match_test.c" \
++	"$root/src/crclist.c" "$root/src/crc32.c" \
++	"$root/portalib/sds.c" "$root/portalib/sdsx.c" \
++	"$root/portalib/slist.c" "$root/portalib/xmalloc.c"
++"$tmp/crclist_match_test"
++
++echo "cocosdc host tests: ok"
+-- 
+2.43.0
+

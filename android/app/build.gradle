@@ -1,0 +1,55 @@
+plugins {
+    id 'com.android.application'
+}
+
+// Release signing: set XROAR_KEYSTORE (a PKCS#12 file with key alias
+// XROAR_KEYALIAS, default "xroar") and XROAR_KEYPASS.  Without them the
+// release APK is signed with the Android debug key, which installs fine but
+// cannot upgrade an APK signed with another key.
+def ks = System.getenv('XROAR_KEYSTORE')
+
+android {
+    namespace 'io.github.carloscamacho.xroar'
+    compileSdk 35
+    buildToolsVersion '35.0.1'
+
+    defaultConfig {
+        applicationId 'io.github.carloscamacho.xroar'
+        minSdk 24
+        targetSdk 34
+        versionCode 2
+        versionName '1.13.0.dev-128d7c64-sdc'
+        // build.sh passes -PxroarAbis=<the ABIs it built>
+        ndk { abiFilters(*((project.findProperty('xroarAbis') ?: 'arm64-v8a,armeabi-v7a,x86_64').split(','))) }
+    }
+
+    signingConfigs {
+        if (ks) {
+            release {
+                storeFile file(ks)
+                storePassword System.getenv('XROAR_KEYPASS')
+                keyAlias System.getenv('XROAR_KEYALIAS') ?: 'xroar'
+                keyPassword System.getenv('XROAR_KEYPASS')
+                storeType 'pkcs12'
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            signingConfig ks ? signingConfigs.release : signingConfigs.debug
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_1_8
+        targetCompatibility JavaVersion.VERSION_1_8
+    }
+
+    packagingOptions {
+        jniLibs { useLegacyPackaging false }
+    }
+
+    lint { abortOnError false; checkReleaseBuilds false }
+}
