@@ -32,8 +32,11 @@ import android.widget.TextView;
  * BUIK's own palette maps onto ours: its highlight #F12633 is our brand red,
  * its foreground #1C1C1C / background #FFFFFF are our light text / dark
  * surface, its positive #73E664 is our green.  BUIK sets everything in
- * Archivo (body) and Archivo Black (headings, button labels, active tabs);
- * the app uses the system sans-serif and sans-serif-black in their place.
+ * Archivo (body) and Archivo Black (headings, button labels, active tabs).
+ * Both are bundled in res/font (SIL OFL 1.1, licences in assets/licenses):
+ * Archivo cut to a static Regular instance (wght 400, wdth 100) and both
+ * subset to Latin-1, Latin Extended-A and common punctuation.  Android 8+
+ * loads them; on 7.x the system sans-serif / sans-serif-black stand in.
  *
  * res/values/styles.xml gives the same values to the system widgets. */
 final class Theme {
@@ -98,10 +101,40 @@ final class Theme {
     static final int TOGGLE_THUMB_DP = 14;
     static final int CHEVRON_DP = 8;
 
-    static final Typeface BODY = Typeface.create("sans-serif", Typeface.NORMAL);
-    static final Typeface HEAVY = Typeface.create("sans-serif-black", Typeface.NORMAL);
+    private static Typeface bodyFace;
+    private static Typeface heavyFace;
 
     private Theme() {
+    }
+
+    /* Archivo, or the system sans-serif before Android 8. */
+    static Typeface bodyFace(Context c) {
+        if (bodyFace == null) {
+            bodyFace = load(c, R.font.archivo_regular, "sans-serif");
+        }
+        return bodyFace;
+    }
+
+    /* Archivo Black, or the system sans-serif-black before Android 8. */
+    static Typeface heavyFace(Context c) {
+        if (heavyFace == null) {
+            heavyFace = load(c, R.font.archivo_black, "sans-serif-black");
+        }
+        return heavyFace;
+    }
+
+    private static Typeface load(Context c, int id, String fallback) {
+        if (android.os.Build.VERSION.SDK_INT >= 26) {
+            try {
+                Typeface t = c.getResources().getFont(id);
+                if (t != null) {
+                    return t;
+                }
+            } catch (RuntimeException e) {
+                // fall through to the system face
+            }
+        }
+        return Typeface.create(fallback, Typeface.NORMAL);
     }
 
     static int dp(Context c, float v) {
@@ -125,7 +158,7 @@ final class Theme {
         TextView t = new TextView(c);
         t.setText(text);
         t.setTextColor(TEXT_STRONG);
-        t.setTypeface(HEAVY);
+        t.setTypeface(heavyFace(c));
         t.setTextSize(TypedValue.COMPLEX_UNIT_SP, sizeSp);
         t.setLineSpacing(0, HEADING_LINE);
         t.setIncludeFontPadding(false);
@@ -136,7 +169,7 @@ final class Theme {
         TextView t = new TextView(c);
         t.setText(text);
         t.setTextColor(color);
-        t.setTypeface(BODY);
+        t.setTypeface(bodyFace(c));
         t.setTextSize(TypedValue.COMPLEX_UNIT_SP, sizeSp);
         t.setLineSpacing(0, BODY_LINE);
         return t;
@@ -148,7 +181,7 @@ final class Theme {
         Button b = new Button(c);
         b.setText(label);
         b.setAllCaps(false);
-        b.setTypeface(HEAVY);
+        b.setTypeface(heavyFace(c));
         b.setTextSize(TypedValue.COMPLEX_UNIT_SP, P4);
         b.setMinWidth(0);
         b.setMinimumWidth(0);
@@ -209,7 +242,7 @@ final class Theme {
     static void styleInput(EditText e) {
         Context c = e.getContext();
         e.setBackground(fieldBackground(c));
-        e.setTypeface(BODY);
+        e.setTypeface(bodyFace(c));
         e.setTextSize(TypedValue.COMPLEX_UNIT_SP, P4);
         e.setTextColor(TEXT_STRONG);
         e.setHintTextColor(TEXT_MUTED);
@@ -235,7 +268,7 @@ final class Theme {
         // The closed field leaves room on the right for the 8 dp chevron.
         t.setPadding(dp(c, SPACE_S), 0, dp(c, inList ? SPACE_S : SPACE_S + CHEVRON_DP + SPACE_XS), 0);
         if (inList && selected) {
-            t.setTypeface(HEAVY);
+            t.setTypeface(heavyFace(c));
         }
         return t;
     }
@@ -281,7 +314,7 @@ final class Theme {
 
     static void styleTab(Button label, View bar, boolean active) {
         label.setTextColor(active ? PRIMARY : TEXT_MUTED);
-        label.setTypeface(active ? HEAVY : BODY);
+        label.setTypeface(active ? heavyFace(label.getContext()) : bodyFace(label.getContext()));
         if (active) {
             GradientDrawable g = new GradientDrawable();
             g.setColor(BRAND_RED);

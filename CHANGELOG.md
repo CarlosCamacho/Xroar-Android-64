@@ -14,6 +14,11 @@
   Section cards have a 1dp border. Pak rows have a line under each and turn red
   while pressed. Tabs have a 2dp bar: red under the active tab, a faint line under
   the rest.
+- BUIK's typefaces bundled: Archivo (body; a static Regular cut from the variable
+  font) and Archivo Black (headings, button labels, the active tab), both subset to
+  Latin-1, Latin Extended-A and common punctuation (121 KB together, SIL OFL 1.1,
+  licences in `assets/licenses/`). Android 8 and later use them; Android 7 keeps the
+  system sans-serif and sans-serif-black.
 
 ### v12 (versionCode 12)
 

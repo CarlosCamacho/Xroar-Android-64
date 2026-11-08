@@ -268,7 +268,7 @@ final class SettingsPanel extends LinearLayout {
         Switch c = new Switch(getContext());
         c.setText(label);
         c.setTextColor(TEXT);
-        c.setTypeface(Theme.BODY);
+        c.setTypeface(Theme.bodyFace(getContext()));
         c.setTextSize(TypedValue.COMPLEX_UNIT_SP, Theme.P4);
         c.setMinHeight(dp(Theme.CONTROL_HEIGHT_DP));
         c.setMinimumHeight(dp(Theme.CONTROL_HEIGHT_DP));

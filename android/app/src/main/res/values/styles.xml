@@ -2,7 +2,8 @@
 <resources>
     <!-- Material, dark: brand red #C8102E / green #00B140 on the MaterialKolor surfaces,
          with BUIK - Basic UI Kit type, spacing and 4dp shapes (see Theme.java).
-         BUIK's Archivo / Archivo Black are stood in for by sans-serif / sans-serif-black. -->
+         Fonts: sans-serif / sans-serif-black here (Android 7); values-v26 swaps in the
+         bundled Archivo / Archivo Black (res/font). -->
     <style name="AppTheme" parent="android:Theme.Material.NoActionBar.Fullscreen">
         <item name="android:windowBackground">@android:color/black</item>
         <item name="android:colorPrimary">#FF241E1F</item>
@@ -14,7 +15,6 @@
         <item name="android:colorControlNormal">#FFA79B9D</item>
         <item name="android:colorControlActivated">#FFFF5C70</item>
         <item name="android:colorControlHighlight">#33FF5C70</item>
-        <item name="android:fontFamily">sans-serif</item>
         <!-- No app-wide buttonStyle/textAppearance: the toolbar and keyboard size their own
              views; Theme.java styles the panels' widgets, AppDialog the system dialogs. -->
         <item name="android:dropDownListViewStyle">@style/Widget.Buik.DropDownList</item>
@@ -30,7 +30,6 @@
         <item name="android:textColorPrimary">#FFEEDFE1</item>
         <item name="android:textColorSecondary">#FFB5A8AA</item>
         <item name="android:windowBackground">@drawable/dialog_bg</item>
-        <item name="android:fontFamily">sans-serif</item>
         <item name="android:windowTitleStyle">@style/Widget.Buik.DialogTitle</item>
         <item name="android:textAppearanceMedium">@style/TextAppearance.Buik.P3</item>
         <item name="android:buttonBarButtonStyle">@style/Widget.Buik.Button.Text</item>

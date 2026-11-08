@@ -234,3 +234,5 @@ harness, **[SRC]** read from source.
 
 GPL-3.0-or-later, as XRoar (see `LICENSE`). SDL2 is zlib-licensed; its Java
 glue is copied in at build time.
+The Archivo and Archivo Black fonts (`res/font/`, subset) are under the SIL
+Open Font License 1.1; the licence texts ship in `assets/licenses/`.
