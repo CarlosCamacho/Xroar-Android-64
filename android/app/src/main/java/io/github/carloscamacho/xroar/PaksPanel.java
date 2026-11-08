@@ -1,7 +1,6 @@
 package io.github.carloscamacho.xroar;
 
 import android.app.AlertDialog;
-import android.graphics.Typeface;
 import android.text.Editable;
 import android.text.TextWatcher;
 import android.view.Gravity;
@@ -46,22 +45,19 @@ final class PaksPanel extends LinearLayout {
 
         LinearLayout header = new LinearLayout(host);
         header.setGravity(Gravity.CENTER_VERTICAL);
-        TextView title = new TextView(host);
-        title.setText("Paks");
-        title.setTextColor(TEXT);
-        title.setTextSize(22);
-        title.setPadding(dp(14), dp(6), dp(8), dp(6));
+        header.setPadding(dp(Theme.SPACE_S), dp(Theme.SPACE_XS), dp(Theme.SPACE_XS), dp(Theme.SPACE_XS));
+        TextView title = Theme.heading(host, "Paks", Theme.H4);
         header.addView(title, new LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-        Button eject = flat("Eject");
+        Button eject = Theme.textButton(host, "Eject");
         eject.setOnClickListener(v -> {
             host.ejectPak();
             updateStatus();
         });
         header.addView(eject);
-        Button add = flat("Add…");
+        Button add = Theme.textButton(host, "Add…");
         add.setOnClickListener(v -> host.pickPaks());
         header.addView(add);
-        Button close = flat("Close");
+        Button close = Theme.textButton(host, "Close");
         close.setOnClickListener(v -> host.closePaks());
         header.addView(close);
         addView(header, new LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
@@ -69,8 +65,7 @@ final class PaksPanel extends LinearLayout {
         search = new EditText(host);
         search.setHint("Search");
         search.setSingleLine(true);
-        search.setTextColor(TEXT);
-        search.setHintTextColor(DIM);
+        Theme.styleInput(search);
         search.addTextChangedListener(new TextWatcher() {
             @Override public void beforeTextChanged(CharSequence s, int a, int b, int c) { }
             @Override public void onTextChanged(CharSequence s, int a, int b, int c) { }
@@ -78,17 +73,18 @@ final class PaksPanel extends LinearLayout {
         });
         LinearLayout.LayoutParams sp = new LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT);
-        sp.setMargins(dp(12), 0, dp(12), 0);
+        sp.setMargins(dp(Theme.SPACE_S), 0, dp(Theme.SPACE_S), 0);
         addView(search, sp);
 
-        status = new TextView(host);
-        status.setTextColor(DIM);
-        status.setTextSize(12);
-        status.setPadding(dp(14), dp(4), dp(14), dp(4));
+        status = Theme.body(host, "", Theme.P5, DIM);
+        status.setPadding(dp(Theme.SPACE_S), dp(Theme.SPACE_XS), dp(Theme.SPACE_S), dp(Theme.SPACE_XS));
         addView(status);
 
+        /* BUIK list: 48 dp rows with a 1 dp line under each, a separator on top. */
+        addView(Theme.separator(host), new LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(Theme.LINE_DP)));
         list = new ListView(host);
         list.setDividerHeight(0);
+        list.setSelector(new android.graphics.drawable.ColorDrawable(0x00000000));
         addView(list, new LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
         list.setOnItemClickListener((AdapterView<?> p, View v, int pos, long id) -> insert(shown.get(pos)));
         list.setOnItemLongClickListener((AdapterView<?> p, View v, int pos, long id) -> {
@@ -96,29 +92,13 @@ final class PaksPanel extends LinearLayout {
             return true;
         });
 
-        countView = new TextView(host);
-        countView.setTextColor(DIM);
-        countView.setTextSize(12);
-        countView.setPadding(dp(14), dp(4), dp(14), dp(8));
+        countView = Theme.body(host, "", Theme.P5, DIM);
+        countView.setPadding(dp(Theme.SPACE_S), dp(Theme.SPACE_XS), dp(Theme.SPACE_S), dp(Theme.SPACE_S));
         addView(countView);
     }
 
     private int dp(int v) {
-        return Math.round(v * getResources().getDisplayMetrics().density);
-    }
-
-    private Button flat(String label) {
-        Button b = new Button(getContext());
-        b.setText(label);
-        b.setAllCaps(false);
-        b.setTextSize(14);
-        b.setTextColor(Theme.PRIMARY);
-        b.setMinWidth(0);
-        b.setMinimumWidth(0);
-        b.setMinHeight(dp(40));
-        b.setMinimumHeight(dp(40));
-        b.setBackgroundColor(0x00000000);
-        return b;
+        return Theme.dp(getContext(), v);
     }
 
     /* Rescan paks/ and show it. */
@@ -143,17 +123,16 @@ final class PaksPanel extends LinearLayout {
             public View getView(int position, View convert, ViewGroup parent) {
                 LinearLayout row = new LinearLayout(getContext());
                 row.setOrientation(VERTICAL);
-                row.setPadding(dp(14), dp(8), dp(14), dp(8));
+                row.setGravity(Gravity.CENTER_VERTICAL);
+                row.setMinimumHeight(dp(Theme.CONTROL_HEIGHT_DP));
+                row.setPadding(dp(Theme.SPACE_S), dp(Theme.SPACE_XS), dp(Theme.SPACE_S), dp(Theme.SPACE_XS));
+                row.setBackground(Theme.listRow(getContext()));
                 PakLibrary.Pak p = getItem(position);
-                TextView t = new TextView(getContext());
-                t.setText(p.title);
-                t.setTextColor(p.needsCoco3 ? DIM : TEXT);
-                t.setTextSize(15);
+                TextView t = Theme.body(getContext(), p.title, Theme.P3, p.needsCoco3 ? DIM : TEXT);
+                t.setLineSpacing(0, Theme.HEADING_LINE);
                 row.addView(t);
-                TextView d = new TextView(getContext());
-                d.setText(p.detail);
-                d.setTextColor(p.needsCoco3 ? WARN : DIM);
-                d.setTextSize(12);
+                TextView d = Theme.body(getContext(), p.detail, Theme.P5, p.needsCoco3 ? WARN : DIM);
+                d.setLineSpacing(0, Theme.HEADING_LINE);
                 row.addView(d);
                 return row;
             }
