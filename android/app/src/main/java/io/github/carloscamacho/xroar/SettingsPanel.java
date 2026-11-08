@@ -2,23 +2,21 @@ package io.github.carloscamacho.xroar;
 
 import android.content.Context;
 import android.content.res.ColorStateList;
-import android.graphics.drawable.GradientDrawable;
 import android.graphics.drawable.RippleDrawable;
-import android.graphics.Color;
-import android.graphics.Typeface;
+import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.AdapterView;
 import android.widget.ArrayAdapter;
 import android.widget.Button;
-import android.widget.CheckBox;
 import android.widget.CompoundButton;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.SeekBar;
 import android.widget.Spinner;
+import android.widget.Switch;
 import android.widget.TextView;
 
 import java.io.File;
@@ -30,13 +28,9 @@ import java.util.Map;
  * behind it) and is saved in settings.conf. */
 final class SettingsPanel extends LinearLayout {
     private static final int BG = Theme.SURFACE;
-    private static final int CARD = Theme.SURFACE_RAISED;
     private static final int TEXT = Theme.TEXT_STRONG;
     private static final int DIM = Theme.TEXT_MUTED;
-    private static final int OUTLINE = Theme.BORDER_STRONG;
     private static final int ACCENT = Theme.PRIMARY;
-    private static final int TONAL = Theme.PRIMARY_CONTAINER;
-    private static final int ON_TONAL = Theme.ON_PRIMARY_CONTAINER;
 
     private static final String[] TAB_NAMES = { "Machine", "Video", "Audio", "Input", "Files" };
 
@@ -65,31 +59,30 @@ final class SettingsPanel extends LinearLayout {
         LinearLayout header = new LinearLayout(host);
         header.setOrientation(HORIZONTAL);
         header.setGravity(Gravity.CENTER_VERTICAL);
-        TextView title = new TextView(host);
-        title.setText("Settings");
-        title.setTextColor(TEXT);
-        title.setTextSize(22);
-        title.setTypeface(Typeface.DEFAULT);
-        title.setPadding(dp(14), dp(6), dp(8), dp(6));
+        header.setPadding(dp(Theme.SPACE_S), dp(Theme.SPACE_XS), dp(Theme.SPACE_XS), dp(Theme.SPACE_XS));
+        TextView title = Theme.heading(host, "Settings", Theme.H4);
         header.addView(title, new LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-        Button close = flatButton("Close");
+        Button close = Theme.textButton(host, "Close");
         close.setOnClickListener(v -> host.closeSettings());
         header.addView(close);
         addView(header, new LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
+        /* BUIK tabs: a 48 dp label over a 2 dp bar, side by side with no gaps. */
         tabRow = new LinearLayout(host);
         tabRow.setOrientation(HORIZONTAL);
+        tabRow.setPadding(dp(Theme.SPACE_S), 0, dp(Theme.SPACE_S), 0);
         for (int i = 0; i < TAB_NAMES.length; i++) {
             final int n = i;
-            Button b = flatButton(TAB_NAMES[i]);
+            Button b = Theme.textButton(host, TAB_NAMES[i]);
+            b.setPadding(dp(Theme.SPACE_XXS), 0, dp(Theme.SPACE_XXS), 0);
             b.setOnClickListener(v -> showTab(n));
             tabButtons[i] = b;
             View ind = new View(host);
             tabIndicators[i] = ind;
             LinearLayout cell = new LinearLayout(host);
             cell.setOrientation(VERTICAL);
-            cell.addView(b, new LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-            cell.addView(ind, new LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(3)));
+            cell.addView(b, new LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(Theme.CONTROL_HEIGHT_DP)));
+            cell.addView(ind, new LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(Theme.TAB_INDICATOR_DP)));
             tabRow.addView(cell, new LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
         }
         addView(tabRow, new LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
@@ -108,51 +101,25 @@ final class SettingsPanel extends LinearLayout {
     /* Widgets */
 
     private int dp(int v) {
-        return Math.round(v * getResources().getDisplayMetrics().density);
+        return Theme.dp(getContext(), v);
     }
 
-    private Button flatButton(String label) {
-        Button b = new Button(getContext());
-        b.setText(label);
-        b.setAllCaps(false);
-        b.setTextSize(14);
-        b.setTextColor(TEXT);
-        b.setMinWidth(0);
-        b.setMinimumWidth(0);
-        b.setMinHeight(dp(40));
-        b.setMinimumHeight(dp(40));
-        b.setPadding(dp(10), 0, dp(10), 0);
-        b.setBackgroundColor(0x00000000);
-        return b;
-    }
-
-    private GradientDrawable round(int color, int radiusDp, int strokeColor) {
-        GradientDrawable g = new GradientDrawable();
-        g.setColor(color);
-        g.setCornerRadius(dp(radiusDp));
-        if (strokeColor != 0) {
-            g.setStroke(dp(1), strokeColor);
-        }
-        return g;
-    }
-
-    /* A Material filled-tonal button. */
+    /* BUIK solid button (brand-red fill) for the main action of a row. */
     private Button actionButton(String label, Runnable r) {
-        Button b = new Button(getContext());
-        b.setText(label);
-        b.setAllCaps(false);
-        b.setTextSize(14);
-        b.setTextColor(ON_TONAL);
-        b.setMinHeight(dp(40));
-        b.setMinimumHeight(dp(40));
-        b.setStateListAnimator(null);
-        b.setBackground(new RippleDrawable(ColorStateList.valueOf(0x33FFFFFF), round(TONAL, Theme.BUTTON_RADIUS_DP, 0), null));
+        Button b = Theme.solidButton(getContext(), label);
         b.setOnClickListener(v -> r.run());
         return b;
     }
 
-    /* An accordion section: a titled card that opens and closes.  Everything
-     * added with add() until the next section() goes inside it. */
+    /* BUIK outlined button for the second action (Remove, Eject, Rewind). */
+    private Button secondaryButton(String label, Runnable r) {
+        Button b = Theme.outlinedButton(getContext(), label);
+        b.setOnClickListener(v -> r.run());
+        return b;
+    }
+
+    /* An accordion section: a BUIK card (4 dp corners, 1 dp line) that opens
+     * and closes.  Everything added with add() until the next section() goes inside it. */
     private void section(String title) {
         final String key = tab + "/" + title;
         Boolean saved = openState.get(key);
@@ -160,32 +127,29 @@ final class SettingsPanel extends LinearLayout {
         sectionCount++;
         LinearLayout card = new LinearLayout(getContext());
         card.setOrientation(VERTICAL);
-        card.setBackground(round(CARD, Theme.CARD_RADIUS_DP, 0));
+        card.setBackground(Theme.card(getContext()));
         LinearLayout.LayoutParams cp = new LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT);
-        cp.setMargins(0, dp(6), 0, dp(2));
+        cp.setMargins(0, dp(Theme.SPACE_XS), 0, 0);
         content.addView(card, cp);
 
         LinearLayout head = new LinearLayout(getContext());
         head.setOrientation(HORIZONTAL);
         head.setGravity(Gravity.CENTER_VERTICAL);
-        head.setPadding(dp(16), dp(14), dp(16), dp(14));
-        head.setBackground(new RippleDrawable(ColorStateList.valueOf(0x22FFFFFF), null, round(0xFFFFFFFF, Theme.CARD_RADIUS_DP, 0)));
-        TextView t = new TextView(getContext());
+        head.setMinimumHeight(dp(Theme.CONTROL_HEIGHT_DP + Theme.SPACE_XS));
+        head.setPadding(dp(Theme.SPACE_S), 0, dp(Theme.SPACE_S), 0);
+        head.setBackground(new RippleDrawable(ColorStateList.valueOf(0x22FFFFFF), null,
+                Theme.box(getContext(), 0xFFFFFFFF, 0, 0)));
         String nice = title.substring(0, 1) + title.substring(1).toLowerCase(java.util.Locale.US);
-        t.setText(nice);
-        t.setTextColor(TEXT);
-        t.setTextSize(16);
+        TextView t = Theme.heading(getContext(), nice, Theme.H6);
         head.addView(t, new LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-        final TextView chev = new TextView(getContext());
-        chev.setTextColor(DIM);
-        chev.setTextSize(18);
+        final TextView chev = Theme.body(getContext(), "", Theme.P4, DIM);
         head.addView(chev);
         card.addView(head);
 
         final LinearLayout inner = new LinearLayout(getContext());
         inner.setOrientation(VERTICAL);
-        inner.setPadding(dp(16), 0, dp(16), dp(14));
+        inner.setPadding(dp(Theme.SPACE_S), 0, dp(Theme.SPACE_S), dp(Theme.SPACE_S));
         card.addView(inner);
         final Runnable apply = () -> {
             inner.setVisibility(open[0] ? View.VISIBLE : View.GONE);
@@ -205,21 +169,17 @@ final class SettingsPanel extends LinearLayout {
         (body != null ? body : content).addView(v);
     }
 
+    /* BUIK P5: notes under a control. */
     private TextView note(String t) {
-        TextView v = new TextView(getContext());
-        v.setText(t);
-        v.setTextColor(DIM);
-        v.setTextSize(12);
-        v.setPadding(0, dp(2), 0, dp(2));
+        TextView v = Theme.body(getContext(), t, Theme.P5, DIM);
+        v.setPadding(0, dp(Theme.SPACE_XXS), 0, dp(Theme.SPACE_XXS));
         return v;
     }
 
+    /* BUIK P4: a line of text the size of the controls'. */
     private TextView line(String t, int color) {
-        TextView v = new TextView(getContext());
-        v.setText(t);
-        v.setTextColor(color);
-        v.setTextSize(14);
-        v.setPadding(0, dp(2), 0, dp(2));
+        TextView v = Theme.body(getContext(), t, Theme.P4, color);
+        v.setPadding(0, dp(Theme.SPACE_XXS), 0, dp(Theme.SPACE_XXS));
         return v;
     }
 
@@ -227,29 +187,47 @@ final class SettingsPanel extends LinearLayout {
         LinearLayout row = new LinearLayout(getContext());
         row.setOrientation(HORIZONTAL);
         row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setPadding(0, dp(Theme.SPACE_XXS), 0, dp(Theme.SPACE_XXS));
         TextView l = line(label, TEXT);
+        l.setPadding(0, 0, dp(Theme.SPACE_XS), 0);
         row.addView(l, new LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 0.42f));
         row.addView(control, new LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 0.58f));
         return row;
     }
 
+    /* Buttons side by side, 8 dp apart. */
     private LinearLayout buttonRow(Button... buttons) {
         LinearLayout row = new LinearLayout(getContext());
         row.setOrientation(HORIZONTAL);
-        for (Button b : buttons) {
+        row.setPadding(0, dp(Theme.SPACE_XXS), 0, dp(Theme.SPACE_XXS));
+        for (int i = 0; i < buttons.length; i++) {
             LinearLayout.LayoutParams lp = new LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
-            lp.setMargins(dp(3), dp(4), dp(3), dp(4));
-            row.addView(b, lp);
+            lp.setMargins(i == 0 ? 0 : dp(Theme.SPACE_XXS), 0, i == buttons.length - 1 ? 0 : dp(Theme.SPACE_XXS), 0);
+            row.addView(buttons[i], lp);
         }
         return row;
     }
 
+    /* A BUIK drop-down: a 48 dp field with a 1 dp line (3 dp red when open),
+     * P4 text, the chevron 16 dp from the right; the list is a raised box of 48 dp rows. */
     private View spinner(String[] labels, final String[] values, String current, final OnPick cb) {
-        Spinner sp = new Spinner(getContext());
-        sp.setBackground(round(0x00000000, Theme.BUTTON_RADIUS_DP, OUTLINE));
-        sp.setPadding(dp(8), dp(6), dp(8), dp(6));
-        ArrayAdapter<String> ad = new ArrayAdapter<>(getContext(), android.R.layout.simple_spinner_item, labels);
-        ad.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        final Spinner sp = new Spinner(getContext(), Spinner.MODE_DROPDOWN);
+        sp.setBackground(Theme.fieldBackground(getContext()));
+        sp.setPadding(0, 0, 0, 0);
+        sp.setPopupBackgroundDrawable(Theme.popupBackground(getContext()));
+        sp.setDropDownVerticalOffset(dp(Theme.CONTROL_HEIGHT_DP + Theme.SPACE_XXS));
+        ArrayAdapter<String> ad = new ArrayAdapter<String>(getContext(), 0, labels) {
+            @Override
+            public View getView(int position, View convert, ViewGroup parent) {
+                return Theme.dropdownRow(getContext(), getItem(position), false, false);
+            }
+
+            @Override
+            public View getDropDownView(int position, View convert, ViewGroup parent) {
+                return Theme.dropdownRow(getContext(), getItem(position), true,
+                        position == sp.getSelectedItemPosition());
+            }
+        };
         sp.setAdapter(ad);
         int idx = 0;
         for (int i = 0; i < values.length; i++) {
@@ -275,24 +253,27 @@ final class SettingsPanel extends LinearLayout {
         });
         FrameLayout box = new FrameLayout(getContext());
         box.addView(sp, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT));
-        TextView arrow = new TextView(getContext());
-        arrow.setText("▾");
-        arrow.setTextColor(DIM);
-        arrow.setTextSize(16);
-        arrow.setPadding(0, 0, dp(12), 0);
+                dp(Theme.CONTROL_HEIGHT_DP)));
+        TextView arrow = Theme.body(getContext(), "▾", Theme.P4, TEXT);
+        arrow.setLineSpacing(0, 1f);
+        arrow.setPadding(0, 0, dp(Theme.SPACE_S), 0);
         box.addView(arrow, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.END | Gravity.CENTER_VERTICAL));
         arrow.setClickable(false);
         return box;
     }
 
-    private CheckBox check(String label, boolean on, final OnBool cb) {
-        CheckBox c = new CheckBox(getContext());
+    /* A BUIK toggle row: the label on the left, the 48 x 24 toggle on the right. */
+    private CompoundButton check(String label, boolean on, final OnBool cb) {
+        Switch c = new Switch(getContext());
         c.setText(label);
         c.setTextColor(TEXT);
+        c.setTypeface(Theme.BODY);
+        c.setTextSize(TypedValue.COMPLEX_UNIT_SP, Theme.P4);
+        c.setMinHeight(dp(Theme.CONTROL_HEIGHT_DP));
+        c.setMinimumHeight(dp(Theme.CONTROL_HEIGHT_DP));
+        Theme.styleToggle(c);
         c.setChecked(on);
-        c.setButtonTintList(ColorStateList.valueOf(ACCENT));
         c.setOnCheckedChangeListener(new CompoundButton.OnCheckedChangeListener() {
             @Override
             public void onCheckedChanged(CompoundButton b, boolean checked) {
@@ -312,7 +293,7 @@ final class SettingsPanel extends LinearLayout {
         top.setGravity(Gravity.CENTER_VERTICAL);
         final TextView label = line(name + ": " + value + unit, TEXT);
         top.addView(label, new LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-        Button reset = flatButton("Reset");
+        Button reset = Theme.textButton(getContext(), "Reset");
         top.addView(reset);
         box.addView(top);
         final SeekBar sb = new SeekBar(getContext());
@@ -353,13 +334,11 @@ final class SettingsPanel extends LinearLayout {
     private void showTab(int n) {
         tab = n;
         for (int i = 0; i < tabButtons.length; i++) {
-            tabButtons[i].setTextColor(i == n ? ACCENT : DIM);
-            tabButtons[i].setTypeface(i == n ? Typeface.DEFAULT_BOLD : Typeface.DEFAULT);
-            tabIndicators[i].setBackgroundColor(i == n ? Theme.BRAND_RED : 0x00000000);
+            Theme.styleTab(tabButtons[i], tabIndicators[i], i == n);
         }
         content = new LinearLayout(getContext());
         content.setOrientation(VERTICAL);
-        content.setPadding(dp(12), dp(4), dp(12), dp(24));
+        content.setPadding(dp(Theme.SPACE_S), dp(Theme.SPACE_XS), dp(Theme.SPACE_S), dp(Theme.SPACE_M));
         body = null;
         sectionCount = 0;
         switch (n) {
@@ -402,7 +381,7 @@ final class SettingsPanel extends LinearLayout {
                     missing ? (slot.required ? Theme.ERROR : DIM) : Theme.TERTIARY_CONTAINER));
             add(buttonRow(
                     actionButton(missing ? "Add…" : "Replace…", () -> host.pickRom(slot)),
-                    actionButton("Remove", () -> host.removeRom(slot))));
+                    secondaryButton("Remove", () -> host.removeRom(slot))));
         }
         add(note("Pick a ROM file from your phone. The app recognizes it by its checksum, "
                 + "names it correctly, and restarts the CoCo with it. Files go in "
@@ -520,7 +499,7 @@ final class SettingsPanel extends LinearLayout {
             add(line("Drive " + (d + 1) + ":  " + shortName(s.get("disk" + d, "")), TEXT));
             add(buttonRow(
                     actionButton("Insert…", () -> host.pickFile(MainActivity.REQ_DISK + drive)),
-                    actionButton("Eject", () -> host.ejectDisk(drive))));
+                    secondaryButton("Eject", () -> host.ejectDisk(drive))));
         }
         add(note("With a CoCoSDC selected, drives 1 and 2 are the SD card's, and each disk image "
                 + "can be in only one of them."));
@@ -529,7 +508,7 @@ final class SettingsPanel extends LinearLayout {
         add(line("SD card:  " + shortName(s.get("emes_image", "")), TEXT));
         add(buttonRow(
                 actionButton("Insert…", () -> host.pickFile(MainActivity.REQ_EMES_IMAGE)),
-                actionButton("Eject", () -> host.ejectEmesImage())));
+                secondaryButton("Eject", () -> host.ejectEmesImage())));
         add(note("For the emesDOS09 cartridge (Machine > Cartridge): a raw FAT16 image, superfloppy or "
                 + "partitioned. Its ROM goes in Machine > ROM files, or tap the 16K ROM in Paks. Changes the "
                 + "CoCo writes go to the app's copy in emesdos/."));
@@ -540,8 +519,8 @@ final class SettingsPanel extends LinearLayout {
                 actionButton("Insert…", () -> host.pickFile(MainActivity.REQ_TAPE)),
                 actionButton("Play/Pause", () -> host.command(MainActivity.OP_TAPE_PLAYPAUSE, 0, 0, null))));
         add(buttonRow(
-                actionButton("Rewind", () -> host.command(MainActivity.OP_TAPE_REWIND, 0, 0, null)),
-                actionButton("Eject", () -> host.ejectTape())));
+                secondaryButton("Rewind", () -> host.command(MainActivity.OP_TAPE_REWIND, 0, 0, null)),
+                secondaryButton("Eject", () -> host.ejectTape())));
         add(note("Then type CLOAD, CLOADM or LOAD on the CoCo; Play starts the tape."));
 
         section("PROGRAMS");

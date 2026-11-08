@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+### v13 (versionCode 13)
+
+- Settings, Paks and dialogs restyled from the BUIK - Basic UI Kit Figma file
+  (type scale, 8dp spacing grid, 4dp corners, 1dp lines, 3dp focus lines), keeping
+  the v12 brand colors. Headings use the heavy face (BUIK's Archivo Black, here
+  sans-serif-black): Settings and Paks titles 24sp, section titles 16sp; body text
+  14sp, notes 12sp. Buttons, inputs, drop-downs, tabs and list rows are 48dp.
+  Primary actions are solid red buttons; Remove, Eject and Rewind are outlined.
+  Checkboxes are now BUIK toggles (48x24, square 14dp knob) at the end of the row.
+  Section cards have a 1dp border. Pak rows have a line under each and turn red
+  while pressed. Tabs have a 2dp bar: red under the active tab, a faint line under
+  the rest.
+
 ### v12 (versionCode 12)
 
 - Brand colors: red #C8102E and its complementary green #00B140 (owner, 2026-11-08).
