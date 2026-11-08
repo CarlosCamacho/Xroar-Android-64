@@ -1,22 +1,22 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <!-- Material, dark, in the owner's MaterialKolor scheme (see Theme.java). -->
+    <!-- Material, dark: brand red #C8102E / green #00B140 on the MaterialKolor surfaces (see Theme.java). -->
     <style name="AppTheme" parent="android:Theme.Material.NoActionBar.Fullscreen">
         <item name="android:windowBackground">@android:color/black</item>
         <item name="android:colorPrimary">#FF241E1F</item>
         <item name="android:colorPrimaryDark">#FF120D0E</item>
-        <item name="android:colorAccent">#FFFF8E83</item>
+        <item name="android:colorAccent">#FFFF5C70</item>
         <item name="android:colorBackground">#FF120D0E</item>
         <item name="android:textColorPrimary">#FFEEDFE1</item>
         <item name="android:textColorSecondary">#FFB5A8AA</item>
         <item name="android:colorControlNormal">#FFA79B9D</item>
-        <item name="android:colorControlActivated">#FFFF8E83</item>
+        <item name="android:colorControlActivated">#FFFF5C70</item>
         <item name="android:alertDialogTheme">@style/AppDialog</item>
     </style>
 
     <style name="AppDialog" parent="android:Theme.Material.Dialog.Alert">
-        <item name="android:colorAccent">#FFFF8E83</item>
-        <item name="android:colorControlActivated">#FFFF8E83</item>
+        <item name="android:colorAccent">#FFFF5C70</item>
+        <item name="android:colorControlActivated">#FFFF5C70</item>
         <item name="android:colorControlNormal">#FFA79B9D</item>
         <item name="android:colorBackground">#FF241E1F</item>
         <item name="android:textColorPrimary">#FFEEDFE1</item>

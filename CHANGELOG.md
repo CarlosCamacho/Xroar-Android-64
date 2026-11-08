@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+### v12 (versionCode 12)
+
+- Brand colors: red #C8102E and its complementary green #00B140 (owner, 2026-11-08).
+  Brand red fills buttons (white text, 5.9:1) and underlines the active tab; red text
+  and accents on the dark background use the lighter tint #FF5C70 (6.4:1), because
+  #C8102E as text is 3.3:1. Green marks good states: ROM found, Pak in the slot,
+  "all fine" in Type. Errors are orange (#FF8A50) so they aren't mistaken for brand red.
+
 ### v11 (versionCode 11)
 
 - **emesDOS09 smart cartridge** (patch 0006), Carlos Camacho's own cartridge DOS

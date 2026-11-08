@@ -131,6 +131,7 @@ final class PaksPanel extends LinearLayout {
     private void updateStatus() {
         String slot = host.currentPakName();
         status.setText(slot == null ? "No Pak in the slot." : "In the slot: " + slot);
+        status.setTextColor(slot == null ? DIM : Theme.BRAND_GREEN);
         countView.setText(all.size() + " in " + library.dir().getPath()
                 + (all.isEmpty() ? "\nTap Add… or copy .rom / .ccc files there." : ""));
     }

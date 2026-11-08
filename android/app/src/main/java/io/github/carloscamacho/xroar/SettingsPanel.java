@@ -355,7 +355,7 @@ final class SettingsPanel extends LinearLayout {
         for (int i = 0; i < tabButtons.length; i++) {
             tabButtons[i].setTextColor(i == n ? ACCENT : DIM);
             tabButtons[i].setTypeface(i == n ? Typeface.DEFAULT_BOLD : Typeface.DEFAULT);
-            tabIndicators[i].setBackgroundColor(i == n ? ACCENT : 0x00000000);
+            tabIndicators[i].setBackgroundColor(i == n ? Theme.BRAND_RED : 0x00000000);
         }
         content = new LinearLayout(getContext());
         content.setOrientation(VERTICAL);
