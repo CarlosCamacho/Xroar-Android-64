@@ -2,6 +2,35 @@
 
 ## Unreleased
 
+### v14 (versionCode 14)
+
+- **Joysticks:** all of them are about 80% of the black area under the picture, and
+  sit lower than the middle so they keep their distance from the picture. They all
+  follow your finger and spring back to the center when you lift it. The old Radio
+  Shack stick stayed where you left it, and every stick dropped back to center as
+  soon as the finger strayed too far from it. A stick now keeps following the finger
+  wherever it goes. A second finger can press the buttons meanwhile.
+- **Joystick position** (Settings > Input): left, center or right under the picture
+  in portrait.
+- **Virtual joystick:** a see-through ring with a knob and two round buttons that
+  hover over the picture, with the stick on the chosen side and the buttons on the
+  other. Its opacity is a slider (10-90%).
+- **Full screen** (hamburger menu): the picture alone, as large as fits. Back or the
+  corner button leaves it. The joystick stays as the virtual one, whichever type is
+  chosen, if Pad is on.
+- **Light and dark theme** (Settings > Look): Dark (the default, as before), Light,
+  or the system's. Brand fills stay #C8102E and #00B140; in the light theme red text
+  is #C8102E (5.9:1; #FF5C70 would be 2.8:1) and green text #00753A (5.8:1; #00B140
+  would be 2.9:1). A quick toggle is in the hamburger menu.
+- **Icons:** 28 icons drawn for the app (`tools/make_icons.py` writes them), on the
+  toolbar, the tabs, the section headers, the buttons and the Paks list.
+- **Hamburger menu** replaces the Menu button: Settings, Full screen, Open the app
+  folder, the theme switch, About. Reset and the hamburger open themed lists with icons.
+- **Folder** (Settings > Files, and the hamburger menu) opens the app's folder in the
+  file manager. [SRC] Not tried on a phone: it asks the system file manager for the
+  folder directly, then the folder picker at that folder, then shows the path.
+- The Look tab has a switch for the labels under the toolbar icons.
+
 ### v13 (versionCode 13)
 
 - Settings, Paks and dialogs restyled from the BUIK - Basic UI Kit Figma file

@@ -3,7 +3,7 @@
     <!-- Android 8+: the BUIK faces, Archivo and Archivo Black, from res/font.
          Same styles as values/styles.xml with only the font changed. -->
     <style name="TextAppearance.Buik" parent="android:TextAppearance.Material">
-        <item name="android:textColor">#FFEEDFE1</item>
+        <item name="android:textColor">?android:attr/textColorPrimary</item>
         <item name="android:fontFamily">@font/archivo_regular</item>
     </style>
     <style name="TextAppearance.Buik.Heading">
@@ -13,7 +13,7 @@
         <item name="android:textAllCaps">false</item>
         <item name="android:fontFamily">@font/archivo_black</item>
         <item name="android:textSize">14sp</item>
-        <item name="android:textColor">#FFFF5C70</item>
+        <item name="android:textColor">?android:attr/colorAccent</item>
         <item name="android:minHeight">48dp</item>
         <item name="android:minWidth">0dp</item>
         <item name="android:paddingStart">16dp</item>

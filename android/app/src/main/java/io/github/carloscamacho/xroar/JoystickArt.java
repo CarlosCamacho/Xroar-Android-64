@@ -9,7 +9,7 @@ import android.graphics.RectF;
 import android.graphics.Shader;
 import android.graphics.Typeface;
 
-/* How the three joysticks look, from above, lit from the top left.
+/* How the joysticks look, from above, lit from the top left.
  *
  *   "std"    Radio Shack black joystick (26-3008): concentric rings, a black
  *            stick, one red button at the top edge (seen from above with its
@@ -18,6 +18,8 @@ import android.graphics.Typeface;
  *            pyramid well, red button top left, aluminium name plate.
  *   "wico"   Wico-style: black case on a red base, domed boss, red base button
  *            top left, red ball top with a white button in its tip.
+ *   "virtual" no case: a see-through ring with a knob and two round buttons,
+ *            drawn over the picture (drawVirtual).
  *
  * drawStatic() is everything that doesn't move (PadView caches it as a
  * bitmap, so it may use blur); drawDynamic() is the stick and the buttons,
@@ -27,8 +29,11 @@ final class JoystickArt {
         float S, cx, cy;          // case: side and centre
         float sx, sy, R;          // stick pivot and travel
         float f1x, f1y, f1r;      // fire 1 (hit radius)
-        float f2r;                // fire 2 (Wico tip) hit radius
+        float f2r;                // fire 2 (Wico tip, or the virtual button) hit radius
         boolean hasFire2;
+        boolean virtual;          // the transparent overlay
+        float vR;                 // virtual: radius of the drawn base ring
+        float f2x, f2y;           // virtual: fire 2 button centre
     }
 
     private static final Paint P = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -38,11 +43,25 @@ final class JoystickArt {
     private JoystickArt() {
     }
 
-    static Geo layout(String type, int w, int h) {
+    /* The case takes 80% of the smaller side of the area, sits a little below the
+     * middle (so it keeps its distance from the picture and is nearer the thumbs),
+     * and goes to the left, centre or right.  "virtual" is different: no case, a
+     * ring and two buttons in the bottom corners of the area. */
+    static Geo layout(String type, int w, int h, String side) {
         Geo g = new Geo();
-        g.S = Math.min(h * 0.94f, w * 0.66f);
-        g.cx = w / 2f;
-        g.cy = h / 2f;
+        if (type.equals("virtual")) {
+            return layoutVirtual(g, w, h, side);
+        }
+        g.S = 0.80f * Math.min(w, h);
+        float slackX = w - g.S, slackY = h - g.S;
+        g.cy = slackY * 0.6f + g.S / 2f;
+        if ("left".equals(side)) {
+            g.cx = g.S / 2f + slackX * 0.15f;
+        } else if ("right".equals(side)) {
+            g.cx = w - g.S / 2f - slackX * 0.15f;
+        } else {
+            g.cx = w / 2f;
+        }
         float S = g.S;
         switch (type) {
         case "deluxe":
@@ -75,6 +94,27 @@ final class JoystickArt {
         return g;
     }
 
+    private static Geo layoutVirtual(Geo g, int w, int h, String side) {
+        float Rb = 0.20f * Math.min(w, h);          // the ring's radius
+        float edge = Rb * 0.30f;
+        boolean stickLeft = !"right".equals(side);   // "center" puts the stick on the left too
+        g.virtual = true;
+        g.vR = Rb;
+        g.S = 2 * Rb;
+        g.R = Rb * 0.85f;                            // travel: a full push is 85% of the way to the ring
+        g.sx = stickLeft ? edge + Rb : w - edge - Rb;
+        g.sy = h - edge - Rb;
+        g.f1r = Rb * 0.55f;
+        g.f1x = stickLeft ? w - edge - g.f1r : edge + g.f1r;
+        g.f1y = h - edge - g.f1r;
+        g.hasFire2 = true;
+        g.f2r = Rb * 0.42f;
+        float toCentre = stickLeft ? -1f : 1f;
+        g.f2x = g.f1x + toCentre * Rb * 0.95f;
+        g.f2y = g.f1y - Rb * 1.05f;
+        return g;
+    }
+
     /* Where the stick's top is drawn, for a stick position of -1..1 each way. */
     static float topX(Geo g, String type, float stickX) {
         return g.sx + stickX * g.R * (type.equals("wico") ? 0.75f : 0.62f);
@@ -85,6 +125,79 @@ final class JoystickArt {
     }
 
     /* ---------------------------------------------------------------- */
+
+    private static int alpha(int rgb, float a) {
+        return (Math.round(Math.max(0f, Math.min(255f, a))) << 24) | (rgb & 0xFFFFFF);
+    }
+
+    /* The transparent overlay: a ring with a knob, and two round buttons, all
+     * see-through at `a` (0-255) so the picture shows behind them.  Dark edges
+     * under the light ones keep them readable on a white screen. */
+    static void drawVirtual(Canvas c, Geo g, float stickX, float stickY, boolean f1, boolean f2, int a) {
+        float Rb = g.vR;
+        P.setShader(null);
+        P.setMaskFilter(null);
+        P.setStyle(Paint.Style.FILL);
+        P.setColor(alpha(0xFFFFFF, a * 0.20f));
+        c.drawCircle(g.sx, g.sy, Rb, P);
+        P.setStyle(Paint.Style.STROKE);
+        P.setStrokeWidth(Rb * 0.07f);
+        P.setColor(alpha(0x000000, a * 0.55f));
+        c.drawCircle(g.sx, g.sy, Rb + Rb * 0.04f, P);
+        P.setStrokeWidth(Rb * 0.045f);
+        P.setColor(alpha(0xFFFFFF, a * 0.85f));
+        c.drawCircle(g.sx, g.sy, Rb, P);
+        // four small arrows: up, down, left, right
+        P.setStyle(Paint.Style.FILL);
+        P.setColor(alpha(0xFFFFFF, a * 0.8f));
+        for (int k = 0; k < 4; k++) {
+            float dx = (k == 0 ? 0 : k == 1 ? 1 : k == 2 ? 0 : -1), dy = (k == 0 ? -1 : k == 1 ? 0 : k == 2 ? 1 : 0);
+            float tx = g.sx + dx * Rb * 0.84f, ty = g.sy + dy * Rb * 0.84f;
+            float u = Rb * 0.07f;
+            PATH.reset();
+            PATH.moveTo(tx + dx * u, ty + dy * u);
+            PATH.lineTo(tx - dx * u + dy * u * 1.2f, ty - dy * u + dx * u * 1.2f);
+            PATH.lineTo(tx - dx * u - dy * u * 1.2f, ty - dy * u - dx * u * 1.2f);
+            PATH.close();
+            c.drawPath(PATH, P);
+        }
+        // the knob
+        float kx = g.sx + stickX * Rb * 0.55f, ky = g.sy + stickY * Rb * 0.55f, kr = Rb * 0.42f;
+        P.setShader(new android.graphics.RadialGradient(kx - kr * 0.3f, ky - kr * 0.35f, kr * 1.3f,
+                new int[] { alpha(0xFFFFFF, a * 0.95f), alpha(0xC8C8C8, a * 0.8f), alpha(0x707070, a * 0.8f) },
+                new float[] { 0f, 0.6f, 1f }, Shader.TileMode.CLAMP));
+        c.drawCircle(kx, ky, kr, P);
+        P.setShader(null);
+        P.setStyle(Paint.Style.STROKE);
+        P.setStrokeWidth(Rb * 0.035f);
+        P.setColor(alpha(0x000000, a * 0.5f));
+        c.drawCircle(kx, ky, kr, P);
+
+        virtualButton(c, g.f1x, g.f1y, g.f1r, f1, 0xC8102E, 0xFF3A55, "1", a);
+        virtualButton(c, g.f2x, g.f2y, g.f2r, f2, 0xF2F2F2, 0xFFFFFF, "2", a);
+        P.setStyle(Paint.Style.FILL);
+    }
+
+    private static void virtualButton(Canvas c, float x, float y, float r, boolean down, int rgb, int rgbDown,
+                                      String label, int a) {
+        float rr = down ? r * 0.93f : r;
+        P.setStyle(Paint.Style.FILL);
+        P.setColor(alpha(down ? rgbDown : rgb, a * (down ? 1.0f : 0.8f)));
+        c.drawCircle(x, y, rr, P);
+        P.setStyle(Paint.Style.STROKE);
+        P.setStrokeWidth(r * 0.09f);
+        P.setColor(alpha(0x000000, a * 0.5f));
+        c.drawCircle(x, y, rr + r * 0.05f, P);
+        P.setStrokeWidth(r * 0.06f);
+        P.setColor(alpha(0xFFFFFF, a * 0.9f));
+        c.drawCircle(x, y, rr, P);
+        P.setStyle(Paint.Style.FILL);
+        T.setTextAlign(Paint.Align.CENTER);
+        T.setTypeface(Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD));
+        T.setTextSize(r * 0.9f);
+        T.setColor(alpha(rgb == 0xF2F2F2 ? 0x202020 : 0xFFFFFF, a * 0.95f));
+        c.drawText(label, x, y + r * 0.32f, T);
+    }
 
     static void drawStatic(Canvas c, String type, Geo g) {
         switch (type) {

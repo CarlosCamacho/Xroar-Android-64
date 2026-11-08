@@ -40,28 +40,104 @@ import android.widget.TextView;
  *
  * res/values/styles.xml gives the same values to the system widgets. */
 final class Theme {
+    /* The brand colors, the same in both modes: red fills (white text on it is
+     * 5.9:1), and green for the "good" fills. */
     static final int BRAND_RED = 0xFFC8102E;
     static final int BRAND_GREEN = 0xFF00B140;
 
-    static final int PRIMARY = 0xFFFF5C70;              // red text / accents on dark
-    static final int ON_PRIMARY = 0xFF000000;
-    static final int PRIMARY_CONTAINER = BRAND_RED;     // filled buttons
     static final int ON_PRIMARY_CONTAINER = 0xFFFFFFFF;
+    static final int PRIMARY_CONTAINER = BRAND_RED;     // filled buttons
     static final int PRIMARY_PRESSED = 0xFFA50D26;
-    static final int SECONDARY = 0xFFF2B35A;            // warnings (amber)
-    static final int SECONDARY_CONTAINER = 0xFF5A0A16;
-    static final int ON_SECONDARY_CONTAINER = 0xFFFFD9DE;
     static final int TERTIARY = BRAND_GREEN;
-    static final int TERTIARY_CONTAINER = BRAND_GREEN;  // "found / ready / all fine"
-    static final int ERROR = 0xFFFF8A50;                // orange, so it isn't mistaken for the brand red
-    static final int SURFACE = 0xFF120D0E;
-    static final int SURFACE_RAISED = 0xFF241E1F;
-    static final int ON_SURFACE = 0xFFFDF1F2;
-    static final int TEXT_STRONG = 0xFFEEDFE1;
-    static final int TEXT_MUTED = 0xFFB5A8AA;
-    static final int BORDER_FAINT = 0xFF3B3334;
-    static final int BORDER_SOFT = 0xFF53494B;
-    static final int BORDER_STRONG = 0xFFA79B9D;
+    static final int TERTIARY_CONTAINER = BRAND_GREEN;
+
+    /* The rest depends on the mode; setDark() fills them in.
+     *
+     * Dark (the v12 palette):  red text #FF5C70 (6.4:1 on SURFACE), green text
+     * #00B140 (6.8:1).
+     * Light: red text is the brand red itself (#C8102E, 5.9:1 on white), because
+     * #FF5C70 would be 2.8:1; green text is the darker #00753A (5.8:1), because
+     * #00B140 would be 2.9:1; orange and amber darken the same way. */
+    static boolean dark = true;
+    static int PRIMARY;               // red text / accents
+    static int ON_PRIMARY;
+    static int SECONDARY;             // warnings (amber)
+    static int SECONDARY_CONTAINER;
+    static int ON_SECONDARY_CONTAINER;
+    static int GOOD;                  // "found / ready / all fine" as text
+    static int ERROR;                 // orange, so it isn't mistaken for the brand red
+    static int STAGE;                 // behind the picture, keyboard and joystick
+    static int SURFACE;               // the toolbar and the sheets
+    static int SURFACE_RAISED;        // cards, menus, dialogs
+    static int ON_SURFACE;
+    static int TEXT_STRONG;
+    static int TEXT_MUTED;
+    static int BORDER_FAINT;
+    static int BORDER_SOFT;
+    static int BORDER_STRONG;
+    static int SCRIM;                 // a veil over the picture (the full-screen button)
+
+    static {
+        setDark(true);
+    }
+
+    static void setDark(boolean d) {
+        dark = d;
+        if (d) {
+            PRIMARY = 0xFFFF5C70;
+            ON_PRIMARY = 0xFF000000;
+            SECONDARY = 0xFFF2B35A;
+            SECONDARY_CONTAINER = 0xFF5A0A16;
+            ON_SECONDARY_CONTAINER = 0xFFFFD9DE;
+            GOOD = BRAND_GREEN;
+            ERROR = 0xFFFF8A50;
+            STAGE = 0xFF000000;
+            SURFACE = 0xFF120D0E;
+            SURFACE_RAISED = 0xFF241E1F;
+            ON_SURFACE = 0xFFFDF1F2;
+            TEXT_STRONG = 0xFFEEDFE1;
+            TEXT_MUTED = 0xFFB5A8AA;
+            BORDER_FAINT = 0xFF3B3334;
+            BORDER_SOFT = 0xFF53494B;
+            BORDER_STRONG = 0xFFA79B9D;
+            SCRIM = 0x99000000;
+        } else {
+            PRIMARY = BRAND_RED;
+            ON_PRIMARY = 0xFFFFFFFF;
+            SECONDARY = 0xFF8A5A00;
+            SECONDARY_CONTAINER = 0xFFFFD9DE;
+            ON_SECONDARY_CONTAINER = 0xFF5A0A16;
+            GOOD = 0xFF00753A;
+            ERROR = 0xFFB54708;
+            STAGE = 0xFFECE6E7;
+            SURFACE = 0xFFFFFFFF;
+            SURFACE_RAISED = 0xFFF5F0F1;
+            ON_SURFACE = 0xFF1C1C1C;
+            TEXT_STRONG = 0xFF1C1C1C;      // BUIK's foreground
+            TEXT_MUTED = 0xFF5F5557;
+            BORDER_FAINT = 0xFFDCD2D4;
+            BORDER_SOFT = 0xFF8E8486;
+            BORDER_STRONG = 0xFF1C1C1C;    // BUIK draws its lines in the foreground color
+            SCRIM = 0x99FFFFFF;
+        }
+    }
+
+    /* "dark", "light", or anything else for the system's setting. */
+    static boolean resolveDark(String pref, Context c) {
+        if ("light".equals(pref)) {
+            return false;
+        }
+        if ("dark".equals(pref)) {
+            return true;
+        }
+        int night = c.getResources().getConfiguration().uiMode & android.content.res.Configuration.UI_MODE_NIGHT_MASK;
+        return night != android.content.res.Configuration.UI_MODE_NIGHT_NO;
+    }
+
+    /* An alert dialog in the current mode. */
+    static android.app.AlertDialog.Builder dialog(Context c) {
+        return new android.app.AlertDialog.Builder(c, dark ? R.style.AppDialog : R.style.AppDialogLight);
+    }
 
     /* ---- BUIK type scale (sp).  Headings: Archivo Black, line height 1.3. */
     static final int H1 = 40;
@@ -92,6 +168,8 @@ final class Theme {
     static final int RADIUS_DP = 4;            // every box: buttons, inputs, drop-downs, toggles, cards, checkboxes
     static final int BUTTON_RADIUS_DP = RADIUS_DP;
     static final int CARD_RADIUS_DP = RADIUS_DP;
+    static final int ICON_DP = 24;             // toolbar and menu icons
+    static final int ICON_SMALL_DP = 20;       // icons beside a label, in buttons and tabs
     static final int LINE_DP = 1;              // "Atom/Bordered"
     static final int FOCUS_LINE_DP = 3;        // "Atom/Bordered Focus"
     static final int CONTROL_HEIGHT_DP = 48;   // buttons, inputs, drop-downs, list rows, tabs
@@ -309,25 +387,6 @@ final class Theme {
         return new InsetDrawable(k, dp(c, insetDp));
     }
 
-    /* ---- Tabs: label in a 48 dp cell over a 2 dp bar.  Active: red heavy label, red bar.
-     * Inactive: regular light label, a 1 dp light line (BUIK draws a thin foreground bar). */
-
-    static void styleTab(Button label, View bar, boolean active) {
-        label.setTextColor(active ? PRIMARY : TEXT_MUTED);
-        label.setTypeface(active ? heavyFace(label.getContext()) : bodyFace(label.getContext()));
-        if (active) {
-            GradientDrawable g = new GradientDrawable();
-            g.setColor(BRAND_RED);
-            g.setCornerRadius(dp(bar.getContext(), RADIUS_DP));
-            bar.setBackground(g);
-        } else {
-            // Bottom 1 dp of the 2 dp bar, so the row reads as one baseline.
-            GradientDrawable line = new GradientDrawable();
-            line.setColor(BORDER_SOFT);
-            bar.setBackground(new InsetDrawable(line, 0, dp(bar.getContext(), 1), 0, 0));
-        }
-    }
-
     /* ---- Cards: BUIK's bordered box, on a raised surface (shadows don't read on dark). */
 
     static Drawable card(Context c) {
@@ -358,6 +417,31 @@ final class Theme {
         View v = new View(c);
         v.setBackgroundColor(BORDER_FAINT);
         v.setMinimumHeight(dp(c, LINE_DP));
+        return v;
+    }
+
+    /* ---- Icons: the vector drawables in res/drawable, tinted at run time. */
+
+    static Drawable icon(Context c, int res, int color, int sizeDp) {
+        Drawable d = c.getDrawable(res).mutate();
+        d.setTint(color);
+        int px = dp(c, sizeDp);
+        d.setBounds(0, 0, px, px);
+        return d;
+    }
+
+    /* An icon at the left of a button's label. */
+    static <B extends Button> B withIcon(B b, int res) {
+        Context c = b.getContext();
+        b.setCompoundDrawablesRelative(icon(c, res, b.getCurrentTextColor(), ICON_SMALL_DP), null, null, null);
+        b.setCompoundDrawablePadding(dp(c, SPACE_XS));
+        return b;
+    }
+
+    static android.widget.ImageView iconView(Context c, int res, int color, int sizeDp) {
+        android.widget.ImageView v = new android.widget.ImageView(c);
+        v.setImageDrawable(icon(c, res, color, sizeDp));
+        v.setScaleType(android.widget.ImageView.ScaleType.FIT_CENTER);
         return v;
     }
 }

@@ -3,21 +3,25 @@ package io.github.carloscamacho.xroar;
 import android.content.Context;
 import android.graphics.Bitmap;
 import android.graphics.Canvas;
+import android.util.SparseIntArray;
 import android.view.HapticFeedbackConstants;
 import android.view.MotionEvent;
 import android.view.View;
 
-/* An on-screen joystick drawn from above, as one of three real controllers:
+/* An on-screen joystick, one of four:
  *
- *   "std"    the Radio Shack black joystick (26-3008): concentric rings, a black
- *            stick, one red button at the top edge.  NOT self-centering: the
- *            stick stays where you leave it until you push it back.
- *   "deluxe" the TRS-80 Deluxe Joystick (26-3012): cream body, a black pyramid
- *            well, red button at the top left, name plate along the front.
- *            Self-centering.
- *   "wico"   the Wico-style stick: black base with a red rim, red ball on the
- *            stick, a red base button and a button in the ball's white tip.
- *            Self-centering, two buttons.
+ *   "std"     the Radio Shack black joystick (26-3008): concentric rings, a black
+ *             stick, one red button at the top edge.
+ *   "deluxe"  the TRS-80 Deluxe Joystick (26-3012): cream body, a black pyramid
+ *             well, red button at the top left, name plate along the front.
+ *   "wico"    the Wico-style stick: black base with a red rim, red ball on the
+ *             stick, a red base button and a button in the ball's white tip.
+ *   "virtual" no case: a see-through ring and two round buttons that hover over
+ *             the picture, so they work in full-screen mode too.
+ *
+ * Every one behaves the same: the stick follows your finger and stays wherever
+ * you hold it, however far you drag, and springs back to the centre only when
+ * you lift the finger.  A second finger can press the buttons meanwhile.
  *
  * It drives XRoar's keyboard joystick ("kjoy0": cursor keys and the two
  * buttons), so a joystick port has to be set to "On-screen pad".  Only touches
@@ -29,23 +33,27 @@ final class PadView extends View {
         void onJoy(int which, boolean down);
     }
 
-    static final String[] TYPE_IDS = { "std", "deluxe", "wico" };
+    static final String[] TYPE_IDS = { "std", "deluxe", "wico", "virtual" };
     static final String[] TYPE_NAMES = {
-        "Joystick (not self-centering)", "Deluxe joystick (self-centering)", "Wico joystick (self-centering, 2 buttons)" };
+        "Joystick (Radio Shack)", "Deluxe joystick", "Wico joystick (2 buttons)",
+        "Virtual (see-through, over the picture)" };
+    static final String[] SIDE_IDS = { "left", "center", "right" };
+    static final String[] SIDE_NAMES = { "Left", "Center", "Right" };
 
+    // what a finger that is down is doing
+    private static final int R_STICK = 1, R_FIRE1 = 2, R_FIRE2 = 3, R_TIP = 4;
 
     private Listener listener;
     private boolean haptic = true;
     private String type = "std";
+    private String side = "center";
+    private int opacity = 45;           // percent, for the virtual joystick
     private final boolean[] state = new boolean[6];
+    private final SparseIntArray roles = new SparseIntArray();   // pointer id -> what it is doing
 
     private int vw, vh;
     private JoystickArt.Geo geo;
     private Bitmap staticBmp;           // the case and everything on it that doesn't move
-    private float sx, sy, R;            // stick centre and travel radius
-    private float f1x, f1y, f1r;        // fire 1 hit circle
-    private float f2r;                  // fire 2 hit circle (Wico ball tip)
-    private boolean hasFire2;
     private float stickX, stickY;       // stick position, -1..1 each way
     private boolean fire1, fire2;
 
@@ -65,15 +73,34 @@ final class PadView extends View {
         if (t == null || t.equals(type)) {
             return;
         }
-        // let go of everything held by the old stick
+        releaseAll();
+        type = t;
+        layout();
+        invalidate();
+    }
+
+    void setSide(String s) {
+        if (s == null || s.equals(side)) {
+            return;
+        }
+        side = s;
+        layout();
+        invalidate();
+    }
+
+    /* How solid the virtual joystick is, 10-90 percent. */
+    void setOpacity(int percent) {
+        opacity = Math.max(10, Math.min(90, percent));
+        invalidate();
+    }
+
+    private void releaseAll() {
+        roles.clear();
         stickX = 0;
         stickY = 0;
         fire1 = false;
         fire2 = false;
         publish();
-        type = t;
-        layout();
-        invalidate();
     }
 
     @Override
@@ -87,20 +114,8 @@ final class PadView extends View {
         if (vw <= 0 || vh <= 0) {
             return;
         }
-        geo = JoystickArt.layout(type, vw, vh);
-        sx = geo.sx;
-        sy = geo.sy;
-        R = geo.R;
-        f1x = geo.f1x;
-        f1y = geo.f1y;
-        f1r = geo.f1r;
-        f2r = geo.f2r;
-        hasFire2 = geo.hasFire2;
+        geo = JoystickArt.layout(type, vw, vh, side);
         staticBmp = null;
-    }
-
-    private boolean selfCentering() {
-        return !type.equals("std");
     }
 
     /* ---------------------------------------------------------------- */
@@ -109,6 +124,10 @@ final class PadView extends View {
     @Override
     protected void onDraw(Canvas c) {
         if (geo == null) {
+            return;
+        }
+        if (geo.virtual) {
+            JoystickArt.drawVirtual(c, geo, stickX, stickY, fire1, fire2, opacity * 255 / 100);
             return;
         }
         if (staticBmp == null || staticBmp.getWidth() != vw || staticBmp.getHeight() != vh) {
@@ -127,69 +146,131 @@ final class PadView extends View {
         return (float) Math.sqrt(dx * dx + dy * dy);
     }
 
-    private boolean onFire1(float x, float y) {
-        return dist(x, y, f1x, f1y) <= f1r * 1.5f;
-    }
-
-    private boolean onFire2(float x, float y) {
-        return hasFire2 && geo != null
-                && dist(x, y, JoystickArt.tipX(geo, stickX), JoystickArt.tipY(geo, stickY)) <= f2r * 1.6f;
-    }
-
     private boolean onStick(float x, float y) {
-        return dist(x, y, sx, sy) <= R * 1.6f;
+        float reach = geo.virtual ? geo.vR * 1.45f : geo.R * 1.6f;
+        return dist(x, y, geo.sx, geo.sy) <= reach;
     }
 
-    private boolean hits(MotionEvent e) {
-        for (int i = 0; i < e.getPointerCount(); i++) {
-            float x = e.getX(i), y = e.getY(i);
-            if (onFire1(x, y) || onFire2(x, y) || onStick(x, y)) {
+    private boolean onFire1(float x, float y) {
+        return dist(x, y, geo.f1x, geo.f1y) <= geo.f1r * (geo.virtual ? 1.25f : 1.5f);
+    }
+
+    /* The Wico's tip button rides on the stick; the virtual joystick's second button is fixed. */
+    private boolean onFire2(float x, float y) {
+        if (!geo.hasFire2) {
+            return false;
+        }
+        if (geo.virtual) {
+            return dist(x, y, geo.f2x, geo.f2y) <= geo.f2r * 1.25f;
+        }
+        return dist(x, y, JoystickArt.tipX(geo, stickX), JoystickArt.tipY(geo, stickY)) <= geo.f2r * 1.6f;
+    }
+
+    private boolean stickHeld() {
+        for (int i = 0; i < roles.size(); i++) {
+            if (roles.valueAt(i) == R_STICK) {
                 return true;
             }
         }
         return false;
     }
 
-    @Override
-    public boolean onTouchEvent(MotionEvent e) {
-        int action = e.getActionMasked();
-        if (action == MotionEvent.ACTION_DOWN && !hits(e)) {
-            return false;   // not ours: let the picture have it
-        }
-        boolean up = action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL;
-        int skip = (action == MotionEvent.ACTION_POINTER_UP) ? e.getActionIndex() : -1;
-        boolean f1 = false, f2 = false, grabbed = false;
-        float nx = 0, ny = 0;
-        if (!up) {
-            for (int i = 0; i < e.getPointerCount(); i++) {
-                if (i == skip) {
-                    continue;
-                }
-                float x = e.getX(i), y = e.getY(i);
-                if (onFire2(x, y) && !grabbed && Math.abs(stickX) + Math.abs(stickY) < 0.2f) {
-                    f2 = true;
-                } else if (onFire1(x, y) && !onStick(x, y)) {
-                    f1 = true;
-                } else if (onStick(x, y)) {
-                    float dx = (x - sx) / R, dy = (y - sy) / R;
-                    float d = (float) Math.sqrt(dx * dx + dy * dy);
-                    if (d > 1f) {
-                        dx /= d;
-                        dy /= d;
-                    }
-                    nx = dx;
-                    ny = dy;
-                    grabbed = true;
-                }
+    /* What a finger that just came down on (x, y) is for, or 0 for nothing of ours. */
+    private int classify(float x, float y) {
+        if (!stickHeld()) {
+            if (!geo.virtual && onFire2(x, y)) {
+                return R_TIP;             // a tap fires; dragging off it moves the stick
+            }
+            if (onStick(x, y)) {
+                return R_STICK;
             }
         }
-        if (grabbed) {
-            stickX = nx;
-            stickY = ny;
-        } else if (selfCentering()) {
-            stickX = 0;
-            stickY = 0;
+        if (onFire1(x, y) && !onStick(x, y)) {
+            return R_FIRE1;
         }
+        if (geo.virtual && onFire2(x, y)) {
+            return R_FIRE2;
+        }
+        return 0;
+    }
+
+    @Override
+    @SuppressWarnings("fallthrough")
+    public boolean onTouchEvent(MotionEvent e) {
+        if (geo == null) {
+            return false;
+        }
+        int action = e.getActionMasked();
+        int idx = e.getActionIndex();
+        switch (action) {
+        case MotionEvent.ACTION_DOWN:
+            roles.clear();
+            // fall through
+        case MotionEvent.ACTION_POINTER_DOWN: {
+            int role = classify(e.getX(idx), e.getY(idx));
+            if (role == 0) {
+                if (action == MotionEvent.ACTION_DOWN) {
+                    return false;         // not ours: let the picture have it
+                }
+                break;
+            }
+            roles.put(e.getPointerId(idx), role);
+            break;
+        }
+        case MotionEvent.ACTION_MOVE:
+            for (int i = 0; i < e.getPointerCount(); i++) {
+                int id = e.getPointerId(i);
+                if (roles.get(id, 0) == R_TIP && !onFire2(e.getX(i), e.getY(i))) {
+                    // the finger left the tip: it is moving the stick after all
+                    if (stickHeld()) {
+                        roles.delete(id);
+                    } else {
+                        roles.put(id, R_STICK);
+                    }
+                }
+            }
+            break;
+        case MotionEvent.ACTION_POINTER_UP:
+            roles.delete(e.getPointerId(idx));
+            break;
+        default:   // UP, CANCEL
+            roles.clear();
+            break;
+        }
+
+        boolean f1 = false, f2 = false, held = false;
+        float nx = 0, ny = 0;
+        for (int i = 0; i < e.getPointerCount(); i++) {
+            if (action == MotionEvent.ACTION_POINTER_UP && i == idx) {
+                continue;
+            }
+            switch (roles.get(e.getPointerId(i), 0)) {
+            case R_STICK: {
+                // follow the finger wherever it goes; past the travel it just pins to the edge
+                float dx = (e.getX(i) - geo.sx) / geo.R, dy = (e.getY(i) - geo.sy) / geo.R;
+                float d = (float) Math.sqrt(dx * dx + dy * dy);
+                if (d > 1f) {
+                    dx /= d;
+                    dy /= d;
+                }
+                nx = dx;
+                ny = dy;
+                held = true;
+                break;
+            }
+            case R_FIRE1:
+                f1 = true;
+                break;
+            case R_FIRE2:
+            case R_TIP:
+                f2 = true;
+                break;
+            default:
+                break;
+            }
+        }
+        stickX = held ? nx : 0;      // no finger on the stick: back to the centre
+        stickY = held ? ny : 0;
         fire1 = f1;
         fire2 = f2;
         publish();

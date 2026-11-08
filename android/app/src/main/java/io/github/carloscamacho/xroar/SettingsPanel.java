@@ -12,6 +12,7 @@ import android.widget.ArrayAdapter;
 import android.widget.Button;
 import android.widget.CompoundButton;
 import android.widget.FrameLayout;
+import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.SeekBar;
@@ -24,15 +25,18 @@ import java.util.HashMap;
 import java.util.Map;
 
 /* The settings screen, modelled on XRoar Online's tabs: Machine, Video, Audio,
- * Input and Files.  Everything applies at once (the emulator keeps running
- * behind it) and is saved in settings.conf. */
+ * Input, Files and Look.  Everything applies at once (the emulator keeps running
+ * behind it) and is saved in settings.conf.  A new panel is built when the
+ * theme changes, so the palette is read once, here, not from constants. */
 final class SettingsPanel extends LinearLayout {
-    private static final int BG = Theme.SURFACE;
-    private static final int TEXT = Theme.TEXT_STRONG;
-    private static final int DIM = Theme.TEXT_MUTED;
-    private static final int ACCENT = Theme.PRIMARY;
+    private final int BG = Theme.SURFACE;
+    private final int TEXT = Theme.TEXT_STRONG;
+    private final int DIM = Theme.TEXT_MUTED;
+    private final int ACCENT = Theme.PRIMARY;
 
-    private static final String[] TAB_NAMES = { "Machine", "Video", "Audio", "Input", "Files" };
+    private static final String[] TAB_NAMES = { "Machine", "Video", "Audio", "Input", "Files", "Look" };
+    private static final int[] TAB_ICONS = { R.drawable.ic_chip, R.drawable.ic_monitor, R.drawable.ic_speaker,
+        R.drawable.ic_gamepad, R.drawable.ic_folder, R.drawable.ic_contrast };
 
     private interface OnPick { void pick(String value); }
     private interface OnInt { void value(int v); }
@@ -41,7 +45,7 @@ final class SettingsPanel extends LinearLayout {
     private final MainActivity host;
     private final LinearLayout tabRow;
     private final ScrollView scroll;
-    private final Button[] tabButtons = new Button[TAB_NAMES.length];
+    private final ToolButton[] tabButtons = new ToolButton[TAB_NAMES.length];
     private final View[] tabIndicators = new View[TAB_NAMES.length];
     private LinearLayout body;                               // the open accordion section's body
     private final Map<String, Boolean> openState = new HashMap<>();
@@ -49,7 +53,7 @@ final class SettingsPanel extends LinearLayout {
     private LinearLayout content;
     private int tab = 0;
 
-    SettingsPanel(MainActivity host) {
+    SettingsPanel(MainActivity host, int firstTab) {
         super(host);
         this.host = host;
         setOrientation(VERTICAL);
@@ -62,34 +66,38 @@ final class SettingsPanel extends LinearLayout {
         header.setPadding(dp(Theme.SPACE_S), dp(Theme.SPACE_XS), dp(Theme.SPACE_XS), dp(Theme.SPACE_XS));
         TextView title = Theme.heading(host, "Settings", Theme.H4);
         header.addView(title, new LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-        Button close = Theme.textButton(host, "Close");
+        Button close = Theme.withIcon(Theme.textButton(host, "Close"), R.drawable.ic_close);
         close.setOnClickListener(v -> host.closeSettings());
         header.addView(close);
         addView(header, new LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
-        /* BUIK tabs: a 48 dp label over a 2 dp bar, side by side with no gaps. */
+        /* BUIK tabs: an icon and label in a cell over a 2 dp bar, side by side with no gaps. */
         tabRow = new LinearLayout(host);
         tabRow.setOrientation(HORIZONTAL);
-        tabRow.setPadding(dp(Theme.SPACE_S), 0, dp(Theme.SPACE_S), 0);
+        tabRow.setPadding(dp(Theme.SPACE_XS), 0, dp(Theme.SPACE_XS), 0);
         for (int i = 0; i < TAB_NAMES.length; i++) {
             final int n = i;
-            Button b = Theme.textButton(host, TAB_NAMES[i]);
-            b.setPadding(dp(Theme.SPACE_XXS), 0, dp(Theme.SPACE_XXS), 0);
+            ToolButton b = new ToolButton(host, TAB_ICONS[i], TAB_NAMES[i], Theme.ICON_SMALL_DP);
             b.setOnClickListener(v -> showTab(n));
             tabButtons[i] = b;
             View ind = new View(host);
             tabIndicators[i] = ind;
             LinearLayout cell = new LinearLayout(host);
             cell.setOrientation(VERTICAL);
-            cell.addView(b, new LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(Theme.CONTROL_HEIGHT_DP)));
+            cell.addView(b, new LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(Theme.CONTROL_HEIGHT_DP + Theme.SPACE_XS)));
             cell.addView(ind, new LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(Theme.TAB_INDICATOR_DP)));
-            tabRow.addView(cell, new LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+            // wrap-content plus an equal share of what is left, so "Machine" is never squeezed
+            tabRow.addView(cell, new LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
         }
         addView(tabRow, new LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
         scroll = new ScrollView(host);
         addView(scroll, new LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
-        showTab(0);
+        showTab(firstTab);
+    }
+
+    int currentTab() {
+        return tab;
     }
 
     /* Rebuild the current tab from the saved settings (after a file pick, say). */
@@ -105,15 +113,15 @@ final class SettingsPanel extends LinearLayout {
     }
 
     /* BUIK solid button (brand-red fill) for the main action of a row. */
-    private Button actionButton(String label, Runnable r) {
-        Button b = Theme.solidButton(getContext(), label);
+    private Button actionButton(String label, int icon, Runnable r) {
+        Button b = Theme.withIcon(Theme.solidButton(getContext(), label), icon);
         b.setOnClickListener(v -> r.run());
         return b;
     }
 
     /* BUIK outlined button for the second action (Remove, Eject, Rewind). */
-    private Button secondaryButton(String label, Runnable r) {
-        Button b = Theme.outlinedButton(getContext(), label);
+    private Button secondaryButton(String label, int icon, Runnable r) {
+        Button b = Theme.withIcon(Theme.outlinedButton(getContext(), label), icon);
         b.setOnClickListener(v -> r.run());
         return b;
     }
@@ -141,10 +149,13 @@ final class SettingsPanel extends LinearLayout {
         head.setBackground(new RippleDrawable(ColorStateList.valueOf(0x22FFFFFF), null,
                 Theme.box(getContext(), 0xFFFFFFFF, 0, 0)));
         String nice = title.substring(0, 1) + title.substring(1).toLowerCase(java.util.Locale.US);
+        head.addView(Theme.iconView(getContext(), sectionIcon(title), ACCENT, Theme.ICON_SMALL_DP),
+                new LayoutParams(dp(Theme.ICON_SMALL_DP), dp(Theme.ICON_SMALL_DP)));
         TextView t = Theme.heading(getContext(), nice, Theme.H6);
+        t.setPadding(dp(Theme.SPACE_S), 0, 0, 0);
         head.addView(t, new LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-        final TextView chev = Theme.body(getContext(), "", Theme.P4, DIM);
-        head.addView(chev);
+        final ImageView chev = Theme.iconView(getContext(), R.drawable.ic_chevron_down, DIM, Theme.ICON_SMALL_DP);
+        head.addView(chev, new LayoutParams(dp(Theme.ICON_SMALL_DP), dp(Theme.ICON_SMALL_DP)));
         card.addView(head);
 
         final LinearLayout inner = new LinearLayout(getContext());
@@ -153,7 +164,7 @@ final class SettingsPanel extends LinearLayout {
         card.addView(inner);
         final Runnable apply = () -> {
             inner.setVisibility(open[0] ? View.VISIBLE : View.GONE);
-            chev.setText(open[0] ? "▴" : "▾");
+            chev.setRotation(open[0] ? 180f : 0f);
         };
         apply.run();
         head.setOnClickListener(v -> {
@@ -162,6 +173,28 @@ final class SettingsPanel extends LinearLayout {
             apply.run();
         });
         body = inner;
+    }
+
+    private static int sectionIcon(String title) {
+        switch (title) {
+        case "MACHINE": return R.drawable.ic_chip;
+        case "ROM FILES": return R.drawable.ic_chip;
+        case "PICTURE": return R.drawable.ic_monitor;
+        case "ADJUST": return R.drawable.ic_settings;
+        case "OPTIONS": return R.drawable.ic_settings;
+        case "AUDIO": return R.drawable.ic_speaker;
+        case "SOUND CARTRIDGE": return R.drawable.ic_cartridge;
+        case "JOYSTICKS": return R.drawable.ic_gamepad;
+        case "KEYBOARD": return R.drawable.ic_keyboard;
+        case "DISK DRIVES": return R.drawable.ic_disk;
+        case "EMESDOS09 SD CARD": return R.drawable.ic_sdcard;
+        case "CASSETTE": return R.drawable.ic_tape;
+        case "PROGRAMS": return R.drawable.ic_play;
+        case "FOLDER": return R.drawable.ic_folder;
+        case "APPEARANCE": return R.drawable.ic_contrast;
+        case "TOOLBAR": return R.drawable.ic_menu;
+        default: return R.drawable.ic_info;
+        }
     }
 
     /* Add to the open section (or straight to the page if there is none). */
@@ -254,11 +287,11 @@ final class SettingsPanel extends LinearLayout {
         FrameLayout box = new FrameLayout(getContext());
         box.addView(sp, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
                 dp(Theme.CONTROL_HEIGHT_DP)));
-        TextView arrow = Theme.body(getContext(), "▾", Theme.P4, TEXT);
-        arrow.setLineSpacing(0, 1f);
-        arrow.setPadding(0, 0, dp(Theme.SPACE_S), 0);
-        box.addView(arrow, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.END | Gravity.CENTER_VERTICAL));
+        ImageView arrow = Theme.iconView(getContext(), R.drawable.ic_chevron_down, TEXT, Theme.ICON_SMALL_DP);
+        FrameLayout.LayoutParams alp = new FrameLayout.LayoutParams(dp(Theme.ICON_SMALL_DP), dp(Theme.ICON_SMALL_DP),
+                Gravity.END | Gravity.CENTER_VERTICAL);
+        alp.setMarginEnd(dp(Theme.SPACE_S));
+        box.addView(arrow, alp);
         arrow.setClickable(false);
         return box;
     }
@@ -334,7 +367,9 @@ final class SettingsPanel extends LinearLayout {
     private void showTab(int n) {
         tab = n;
         for (int i = 0; i < tabButtons.length; i++) {
-            Theme.styleTab(tabButtons[i], tabIndicators[i], i == n);
+            tabButtons[i].setActive(i == n);
+            // BUIK: a 2 dp bar, brand red under the open tab and a faint line under the rest
+            tabIndicators[i].setBackground(Theme.box(getContext(), i == n ? Theme.BRAND_RED : Theme.BORDER_FAINT, 0, 0));
         }
         content = new LinearLayout(getContext());
         content.setOrientation(VERTICAL);
@@ -346,7 +381,8 @@ final class SettingsPanel extends LinearLayout {
         case 1: buildVideo(); break;
         case 2: buildAudio(); break;
         case 3: buildInput(); break;
-        default: buildFiles(); break;
+        case 4: buildFiles(); break;
+        default: buildLook(); break;
         }
         scroll.removeAllViews();
         scroll.addView(content);
@@ -378,10 +414,10 @@ final class SettingsPanel extends LinearLayout {
             boolean missing = label == null;
             add(line(slot.title, TEXT));
             add(line(missing ? (slot.required ? "MISSING" : "not present (optional)") : label,
-                    missing ? (slot.required ? Theme.ERROR : DIM) : Theme.TERTIARY_CONTAINER));
+                    missing ? (slot.required ? Theme.ERROR : DIM) : Theme.GOOD));
             add(buttonRow(
-                    actionButton(missing ? "Add…" : "Replace…", () -> host.pickRom(slot)),
-                    secondaryButton("Remove", () -> host.removeRom(slot))));
+                    actionButton(missing ? "Add…" : "Replace…", R.drawable.ic_add, () -> host.pickRom(slot)),
+                    secondaryButton("Remove", R.drawable.ic_trash, () -> host.removeRom(slot))));
         }
         add(note("Pick a ROM file from your phone. The app recognizes it by its checksum, "
                 + "names it correctly, and restarts the CoCo with it. Files go in "
@@ -470,9 +506,16 @@ final class SettingsPanel extends LinearLayout {
                 + "you touch the picture. \"On-screen pad\" gives a direction pad and two fire buttons."));
         add(labeled("Joystick type", spinner(PadView.TYPE_NAMES, PadView.TYPE_IDS,
                 s.get("ui_joy_type", "std"), v -> host.setUiString("ui_joy_type", v))));
-        add(note("Drawn from above like the real controllers. The Radio Shack joystick stays where you "
-                + "leave it (push it back to center); the Deluxe and Wico spring back. The Wico has two buttons: "
-                + "the red one on the base and the white tip of the ball."));
+        add(note("Drawn from above like the real controllers. Push the stick with your finger: it stays where "
+                + "you hold it, and springs back to the center when you lift your finger. The Wico has two "
+                + "buttons: the red one on the base and the white tip of the ball. The virtual joystick has "
+                + "no case: it hovers see-through over the picture, so it works in full-screen mode too."));
+        add(labeled("Joystick position", spinner(PadView.SIDE_NAMES, PadView.SIDE_IDS,
+                s.get("ui_joy_side", "center"), v -> host.setUiString("ui_joy_side", v))));
+        add(note("Where the joystick sits under the picture in portrait. The virtual joystick puts its stick on "
+                + "that side and the fire buttons on the other (Center acts as Left)."));
+        add(slider("Virtual joystick opacity", 10, 90, s.getInt("ui_vpad_alpha", 45), 45, "%",
+                v -> host.previewVpadAlpha(v), v -> host.setUiInt("ui_vpad_alpha", v)));
         add(check("Show on-screen pad", s.getBool("ui_pad", false), b -> host.setPadVisible(b)));
 
         section("KEYBOARD");
@@ -498,8 +541,8 @@ final class SettingsPanel extends LinearLayout {
             final int drive = d;
             add(line("Drive " + (d + 1) + ":  " + shortName(s.get("disk" + d, "")), TEXT));
             add(buttonRow(
-                    actionButton("Insert…", () -> host.pickFile(MainActivity.REQ_DISK + drive)),
-                    secondaryButton("Eject", () -> host.ejectDisk(drive))));
+                    actionButton("Insert…", R.drawable.ic_disk, () -> host.pickFile(MainActivity.REQ_DISK + drive)),
+                    secondaryButton("Eject", R.drawable.ic_eject, () -> host.ejectDisk(drive))));
         }
         add(note("With a CoCoSDC selected, drives 1 and 2 are the SD card's, and each disk image "
                 + "can be in only one of them."));
@@ -507,8 +550,8 @@ final class SettingsPanel extends LinearLayout {
         section("EMESDOS09 SD CARD");
         add(line("SD card:  " + shortName(s.get("emes_image", "")), TEXT));
         add(buttonRow(
-                actionButton("Insert…", () -> host.pickFile(MainActivity.REQ_EMES_IMAGE)),
-                secondaryButton("Eject", () -> host.ejectEmesImage())));
+                actionButton("Insert…", R.drawable.ic_sdcard, () -> host.pickFile(MainActivity.REQ_EMES_IMAGE)),
+                secondaryButton("Eject", R.drawable.ic_eject, () -> host.ejectEmesImage())));
         add(note("For the emesDOS09 cartridge (Machine > Cartridge): a raw FAT16 image, superfloppy or "
                 + "partitioned. Its ROM goes in Machine > ROM files, or tap the 16K ROM in Paks. Changes the "
                 + "CoCo writes go to the app's copy in emesdos/."));
@@ -516,21 +559,66 @@ final class SettingsPanel extends LinearLayout {
         section("CASSETTE");
         add(line("Tape:  " + shortName(host.tapeName()), TEXT));
         add(buttonRow(
-                actionButton("Insert…", () -> host.pickFile(MainActivity.REQ_TAPE)),
-                actionButton("Play/Pause", () -> host.command(MainActivity.OP_TAPE_PLAYPAUSE, 0, 0, null))));
+                actionButton("Insert…", R.drawable.ic_tape, () -> host.pickFile(MainActivity.REQ_TAPE)),
+                actionButton("Play/Pause", R.drawable.ic_play, () -> host.command(MainActivity.OP_TAPE_PLAYPAUSE, 0, 0, null))));
         add(buttonRow(
-                secondaryButton("Rewind", () -> host.command(MainActivity.OP_TAPE_REWIND, 0, 0, null)),
-                secondaryButton("Eject", () -> host.ejectTape())));
+                secondaryButton("Rewind", R.drawable.ic_rewind, () -> host.command(MainActivity.OP_TAPE_REWIND, 0, 0, null)),
+                secondaryButton("Eject", R.drawable.ic_eject, () -> host.ejectTape())));
         add(note("Then type CLOAD, CLOADM or LOAD on the CoCo; Play starts the tape."));
 
         section("PROGRAMS");
         add(buttonRow(
-                actionButton("Load file…", () -> host.pickFile(MainActivity.REQ_LOAD)),
-                actionButton("Run file…", () -> host.pickFile(MainActivity.REQ_RUN))));
+                actionButton("Load file…", R.drawable.ic_file, () -> host.pickFile(MainActivity.REQ_LOAD)),
+                actionButton("Run file…", R.drawable.ic_play, () -> host.pickFile(MainActivity.REQ_RUN))));
         add(note("Load attaches a disk, tape or program. Run also tries to start it."));
 
-        section("FOLDER");
-        add(note(host.homeDir().getPath()));
-        add(note("ROMs, xroar.conf, the SD card (sdcard/), and the log (xroar-log.txt) live here."));
+        folderRow();
+        add(note("ROMs, xroar.conf, the SD card (sdcard/), and the log (xroar-log.txt) live there. "
+                + "Tap Folder to open it in your file manager."));
+    }
+
+    /* "Folder" is a row, not an accordion: tapping it opens the folder in the file manager. */
+    private void folderRow() {
+        LinearLayout row = new LinearLayout(getContext());
+        row.setOrientation(HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setMinimumHeight(dp(Theme.CONTROL_HEIGHT_DP + Theme.SPACE_XS));
+        row.setPadding(dp(Theme.SPACE_S), dp(Theme.SPACE_XS), dp(Theme.SPACE_S), dp(Theme.SPACE_XS));
+        row.setBackground(new android.graphics.drawable.RippleDrawable(ColorStateList.valueOf(0x33FF5C70),
+                Theme.card(getContext()), Theme.box(getContext(), 0xFFFFFFFF, 0, 0)));
+        row.setClickable(true);
+        row.setContentDescription("Folder: open in the file manager");
+        row.addView(Theme.iconView(getContext(), R.drawable.ic_folder, ACCENT, Theme.ICON_SMALL_DP),
+                new LayoutParams(dp(Theme.ICON_SMALL_DP), dp(Theme.ICON_SMALL_DP)));
+        LinearLayout text = new LinearLayout(getContext());
+        text.setOrientation(VERTICAL);
+        text.setPadding(dp(Theme.SPACE_S), 0, dp(Theme.SPACE_S), 0);
+        text.addView(Theme.heading(getContext(), "Folder", Theme.H6));
+        TextView path = note(host.homeDir().getPath());
+        text.addView(path);
+        row.addView(text, new LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        ImageView go = Theme.iconView(getContext(), R.drawable.ic_chevron_down, DIM, Theme.ICON_SMALL_DP);
+        go.setRotation(-90f);   // pointing right: "open"
+        row.addView(go, new LayoutParams(dp(Theme.ICON_SMALL_DP), dp(Theme.ICON_SMALL_DP)));
+        row.setOnClickListener(v -> host.openHomeFolder());
+        LinearLayout.LayoutParams lp = new LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT);
+        lp.setMargins(0, dp(Theme.SPACE_XS), 0, 0);
+        content.addView(row, lp);
+        body = null;
+    }
+
+    private void buildLook() {
+        final Settings s = host.settings();
+        section("APPEARANCE");
+        add(labeled("Theme", spinner(
+                new String[] { "Dark", "Light", "Same as the system" },
+                new String[] { "dark", "light", "system" },
+                s.get("ui_theme", "dark"), v -> host.setThemePref(v))));
+        add(note("The brand red and green stay the same. In the light theme red text is the brand red "
+                + "itself and good-news text a darker green, so both stay readable on white."));
+        section("TOOLBAR");
+        add(check("Show labels under the toolbar icons", s.getBool("ui_labels", true),
+                b -> host.setUi("ui_labels", b)));
     }
 }

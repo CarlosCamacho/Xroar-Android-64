@@ -1,6 +1,7 @@
 package io.github.carloscamacho.xroar;
 
 import android.app.AlertDialog;
+import android.content.ActivityNotFoundException;
 import android.content.Intent;
 import android.content.res.Configuration;
 import android.database.Cursor;
@@ -11,6 +12,7 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.SystemClock;
+import android.provider.DocumentsContract;
 import android.provider.OpenableColumns;
 import android.system.Os;
 import android.text.InputType;
@@ -27,7 +29,7 @@ import android.widget.CheckBox;
 import android.widget.EditText;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
-import android.widget.PopupMenu;
+import android.widget.ImageView;
 import android.widget.Toast;
 
 import java.io.ByteArrayInputStream;
@@ -35,6 +37,8 @@ import java.io.File;
 import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.util.ArrayList;
+import java.util.List;
 
 import org.libsdl.app.SDLActivity;
 
@@ -49,6 +53,8 @@ import org.libsdl.app.SDLActivity;
  * keyboard, pad, settings or Paks below it.  In landscape the picture is on
  * the left at full height and a column on the right holds the toolbar and a
  * Keyboard / Joystick tab (or the settings or Paks, which replace the tab).
+ * The "virtual" joystick instead hovers over the picture, and full-screen mode
+ * hides everything but the picture and that joystick.
  */
 public class MainActivity extends SDLActivity {
     private static final String TAG = "XRoar";
@@ -86,14 +92,19 @@ public class MainActivity extends SDLActivity {
     private Settings settings;
     private FrameLayout root;
     private LinearLayout toolbar;
-    private Button keysButton;
-    private Button padButton;
+    private ToolButton keysButton;
+    private ToolButton padButton;
+    private ToolButton typeButton;
+    private ToolButton resetButton;
+    private ToolButton paksButton;
+    private ToolButton menuButton;
+    private ImageView exitFullscreen;
     private CocoKeyboardView kbd;
     private PadView pad;
     private SettingsPanel panel;
     private PaksPanel paksPanel;
-    private Button tabKeys;
-    private Button tabJoy;
+    private ToolButton tabKeys;
+    private ToolButton tabJoy;
     private final PakLibrary[] pakLibraryRef = new PakLibrary[1];
     private RomManager roms;
     private String currentPak;
@@ -102,6 +113,7 @@ public class MainActivity extends SDLActivity {
 
     private boolean settingsOpen;
     private boolean paksOpen;
+    private boolean fullscreen;
     private int insetL, insetT, insetR, insetB;
     private long lastBack;
 
@@ -150,6 +162,7 @@ public class MainActivity extends SDLActivity {
             Log.e(TAG, "can't set XROAR_HOME", e);
         }
         settings = new Settings(homeDir());
+        Theme.setDark(Theme.resolveDark(settings.get("ui_theme", "dark"), this));
         pakLibraryRef[0] = new PakLibrary(homeDir());
         pakLibraryRef[0].dir().mkdirs();
         roms = new RomManager(homeDir());
@@ -267,18 +280,8 @@ public class MainActivity extends SDLActivity {
         return Math.round(v * getResources().getDisplayMetrics().density);
     }
 
-    private Button toolButton(String label, View.OnClickListener l) {
-        Button b = new Button(this);
-        b.setText(label);
-        b.setAllCaps(false);
-        b.setTextSize(13);
-        b.setTextColor(Theme.TEXT_STRONG);
-        b.setMinWidth(0);
-        b.setMinimumWidth(0);
-        b.setMinHeight(0);
-        b.setMinimumHeight(0);
-        b.setPadding(dp(4), 0, dp(4), 0);
-        b.setBackgroundColor(0x00000000);
+    private ToolButton iconButton(int icon, String label, View.OnClickListener l) {
+        ToolButton b = new ToolButton(this, icon, label, Theme.ICON_DP);
         b.setOnClickListener(l);
         return b;
     }
@@ -289,7 +292,7 @@ public class MainActivity extends SDLActivity {
             parent.removeView(mLayout);
         }
         root = new FrameLayout(this);
-        root.setBackgroundColor(Color.BLACK);
+        root.setBackgroundColor(Theme.STAGE);
         root.addView(mLayout, new FrameLayout.LayoutParams(-1, -1));
 
         pad = new PadView(this);
@@ -303,28 +306,21 @@ public class MainActivity extends SDLActivity {
         toolbar = new LinearLayout(this);
         toolbar.setOrientation(LinearLayout.HORIZONTAL);
         toolbar.setBackgroundColor(Theme.SURFACE);
-        keysButton = toolButton("Keys", v -> setKeyboardVisible(!settings.getBool("ui_kbd", true)));
-        padButton = toolButton("Pad", v -> setPadVisible(!settings.getBool("ui_pad", false)));
-        Button typeButton = toolButton("Type…", v -> showTypeDialog());
-        final Button resetButton = toolButton("Reset", null);
-        resetButton.setOnClickListener(v -> {
-            PopupMenu m = new PopupMenu(this, resetButton);
-            m.getMenu().add(0, 1, 0, "Soft reset (like the RESET button)");
-            m.getMenu().add(0, 2, 1, "Hard reset (power off and on)");
-            m.setOnMenuItemClickListener(item -> {
-                command(item.getItemId() == 1 ? OP_SOFT_RESET : OP_HARD_RESET, 0, 0, null);
-                return true;
-            });
-            m.show();
-        });
-        Button paksButton = toolButton("Paks", v -> openPaks());
-        Button menuButton = toolButton("Menu", v -> openSettings());
-        for (Button b : new Button[] { keysButton, padButton, typeButton, resetButton, paksButton, menuButton }) {
+        keysButton = iconButton(R.drawable.ic_keyboard, "Keys", v -> setKeyboardVisible(!settings.getBool("ui_kbd", true)));
+        padButton = iconButton(R.drawable.ic_gamepad, "Pad", v -> setPadVisible(!settings.getBool("ui_pad", false)));
+        typeButton = iconButton(R.drawable.ic_text, "Type", v -> showTypeDialog());
+        resetButton = iconButton(R.drawable.ic_reset, "Reset", v -> showResetMenu());
+        paksButton = iconButton(R.drawable.ic_cartridge, "Paks", v -> openPaks());
+        // The hamburger has no label: it is the one icon everybody knows.
+        menuButton = iconButton(R.drawable.ic_menu, "Menu", v -> showMenu());
+        menuButton.setLabelShown(false);
+        for (ToolButton b : new ToolButton[] { keysButton, padButton, typeButton, resetButton, paksButton }) {
             toolbar.addView(b, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f));
         }
+        toolbar.addView(menuButton, new LinearLayout.LayoutParams(dp(52), ViewGroup.LayoutParams.MATCH_PARENT));
         root.addView(toolbar, new FrameLayout.LayoutParams(0, 0));
 
-        panel = new SettingsPanel(this);
+        panel = new SettingsPanel(this, 0);
         panel.setVisibility(View.GONE);
         root.addView(panel, new FrameLayout.LayoutParams(0, 0));
 
@@ -333,12 +329,20 @@ public class MainActivity extends SDLActivity {
         root.addView(paksPanel, new FrameLayout.LayoutParams(0, 0));
 
         // Landscape: these two pick what the right-hand column shows.
-        tabKeys = toolButton("Keyboard", v -> setLandscapeTab("keys"));
-        tabJoy = toolButton("Joystick", v -> setLandscapeTab("joy"));
-        tabKeys.setTextSize(15);
-        tabJoy.setTextSize(15);
+        tabKeys = iconButton(R.drawable.ic_keyboard, "Keyboard", v -> setLandscapeTab("keys"));
+        tabJoy = iconButton(R.drawable.ic_gamepad, "Joystick", v -> setLandscapeTab("joy"));
         root.addView(tabKeys, new FrameLayout.LayoutParams(0, 0));
         root.addView(tabJoy, new FrameLayout.LayoutParams(0, 0));
+
+        // Full screen: the one control left, a translucent button in the corner.
+        exitFullscreen = new ImageView(this);
+        exitFullscreen.setImageDrawable(Theme.icon(this, R.drawable.ic_fullscreen_exit, Theme.TEXT_STRONG, Theme.ICON_DP));
+        exitFullscreen.setScaleType(ImageView.ScaleType.CENTER);
+        exitFullscreen.setBackground(Theme.box(this, Theme.SCRIM, 0, 0));
+        exitFullscreen.setContentDescription("Exit full screen");
+        exitFullscreen.setOnClickListener(v -> setFullscreen(false));
+        exitFullscreen.setVisibility(View.GONE);
+        root.addView(exitFullscreen, new FrameLayout.LayoutParams(0, 0));
 
         applyUiSettings();
 
@@ -380,17 +384,24 @@ public class MainActivity extends SDLActivity {
         kbd.setSticky(sticky);
         kbd.setHaptic(haptic);
         kbd.setStyle(settings.get("ui_kbd_style", "white"));
-        pad.setType(settings.get("ui_joy_type", "std"));
-        boolean joyTab = "joy".equals(settings.get("ui_tab", "keys"));
-        if (tabKeys != null) {
-            tabKeys.setTextColor(joyTab ? Theme.TEXT_MUTED : Theme.PRIMARY);
-            tabJoy.setTextColor(joyTab ? Theme.PRIMARY : Theme.TEXT_MUTED);
-        }
+        // In full screen only the see-through joystick makes sense, whichever one is chosen.
+        pad.setType(fullscreen ? "virtual" : settings.get("ui_joy_type", "std"));
+        pad.setSide(settings.get("ui_joy_side", "center"));
+        pad.setOpacity(settings.getInt("ui_vpad_alpha", 45));
         pad.setHaptic(haptic);
-        boolean kv = settings.getBool("ui_kbd", true);
-        boolean pv = settings.getBool("ui_pad", false);
-        keysButton.setTextColor(kv ? Theme.PRIMARY : Theme.TEXT_STRONG);
-        padButton.setTextColor(pv ? Theme.PRIMARY : Theme.TEXT_STRONG);
+        boolean joyTab = "joy".equals(settings.get("ui_tab", "keys"));
+        tabKeys.setActive(!joyTab);
+        tabJoy.setActive(joyTab);
+        boolean labels = settings.getBool("ui_labels", true);
+        for (ToolButton b : new ToolButton[] { keysButton, padButton, typeButton, resetButton, paksButton }) {
+            b.setLabelShown(labels);
+        }
+        keysButton.setActive(settings.getBool("ui_kbd", true));
+        padButton.setActive(settings.getBool("ui_pad", false));
+        typeButton.setActive(false);
+        resetButton.setActive(false);
+        paksButton.setActive(paksOpen);
+        menuButton.setActive(settingsOpen);
     }
 
     private static void place(View v, int x, int y, int w, int h) {
@@ -423,11 +434,35 @@ public class MainActivity extends SDLActivity {
         }
         int l = insetL, r = insetR, t = insetT, b = insetB;
         int aw = W - l - r;
-        int tb = dp(44);
+        boolean labels = settings.getBool("ui_labels", true);
+        int tb = dp(labels ? 56 : 48);
         boolean kv = settings.getBool("ui_kbd", true);
         boolean pv = settings.getBool("ui_pad", false);
         boolean sheet = settingsOpen || paksOpen;
+        boolean virtual = "virtual".equals(settings.get("ui_joy_type", "std"));
         float kbdAspect = CocoKeyboardView.COLS / 5f;
+
+        if (fullscreen) {
+            // The picture, 4:3, as large as fits and centred; the see-through
+            // joystick over the whole screen, so its corners sit on the black bars.
+            int ah = H - t - b;
+            int pw = aw, ph = aw * 3 / 4;
+            if (ph > ah) {
+                ph = ah;
+                pw = ah * 4 / 3;
+            }
+            place(mLayout, l + (aw - pw) / 2, t + (ah - ph) / 2, pw, ph);
+            for (View v : new View[] { toolbar, kbd, panel, paksPanel, tabKeys, tabJoy }) {
+                show(v, false);
+            }
+            place(pad, l, t, aw, ah);
+            show(pad, pv);
+            int eb = dp(44);
+            place(exitFullscreen, W - r - eb - dp(8), t + dp(8), eb, eb);
+            show(exitFullscreen, true);
+            return;
+        }
+        show(exitFullscreen, false);
 
         if (H >= W) {
             // Portrait: toolbar, picture (4:3), then keyboard / pad / settings / Paks.
@@ -456,22 +491,31 @@ public class MainActivity extends SDLActivity {
                 int kh = kv ? Math.min(Math.round(aw / kbdAspect * 1.1f), avail) : 0;
                 place(kbd, l, y, aw, Math.max(kh, 1));
                 show(kbd, kv && kh > 0);
-                int ph = pv ? Math.min(avail - kh, Math.round(aw * 0.5f)) : 0;
-                place(pad, l, y + kh, aw, Math.max(ph, 1));
-                show(pad, pv && ph > 0);
+                if (virtual) {
+                    // hovers over the picture, so it takes no room of its own
+                    place(pad, l, t + tb, aw, sdlH);
+                    show(pad, pv);
+                } else {
+                    // the rest of the black area: the joystick fills 80% of it
+                    int ph = pv ? Math.max(0, avail - kh) : 0;
+                    place(pad, l, y + kh, aw, Math.max(ph, 1));
+                    show(pad, pv && ph > 0);
+                }
             }
         } else {
             // Landscape: the picture (4:3) on the left at full height; on the
             // right the toolbar and a Keyboard / Joystick tab.
             int ah = H - t - b;
             int picW = Math.min(ah * 4 / 3, Math.max(aw - dp(300), aw / 2));
+            int picH = picW * 3 / 4 > ah ? ah : picW * 3 / 4;
             int rw = aw - picW;
             int rx = l + picW;
-            place(mLayout, l, t, picW, picW * 3 / 4 > ah ? ah : picW * 3 / 4);
+            place(mLayout, l, t, picW, picH);
             place(toolbar, rx, t, rw, tb);
             show(toolbar, true);
             keysButton.setVisibility(View.GONE);
-            padButton.setVisibility(View.GONE);
+            // the see-through joystick has no tab, so the toolbar's Pad button turns it on and off
+            padButton.setVisibility(virtual ? View.VISIBLE : View.GONE);
             kbd.setOverlay(false);
             int top = t + tb;
             int avail = Math.max(0, H - b - top);
@@ -487,9 +531,17 @@ public class MainActivity extends SDLActivity {
                 show(tabJoy, false);
                 show(kbd, false);
                 show(pad, false);
+            } else if (virtual) {
+                show(tabKeys, false);
+                show(tabJoy, false);
+                int kh = Math.min(avail, Math.round(rw / kbdAspect));
+                place(kbd, rx, top, rw, Math.max(kh, 1));
+                show(kbd, kh > 0);
+                place(pad, l, t, picW, picH);
+                show(pad, pv);
             } else {
                 boolean joyTab = "joy".equals(settings.get("ui_tab", "keys"));
-                int th = dp(40);
+                int th = dp(labels ? 56 : 48);
                 place(tabKeys, rx, top, rw / 2, th);
                 place(tabJoy, rx + rw / 2, top, rw - rw / 2, th);
                 show(tabKeys, true);
@@ -519,7 +571,19 @@ public class MainActivity extends SDLActivity {
     public void onConfigurationChanged(Configuration newConfig) {
         super.onConfigurationChanged(newConfig);
         if (root != null) {
+            if ("system".equals(settings.get("ui_theme", "dark"))
+                    && Theme.resolveDark("system", this) != Theme.dark) {
+                applyTheme();
+            }
             root.post(this::layoutAll);
+        }
+    }
+
+    @Override
+    public void onWindowFocusChanged(boolean hasFocus) {
+        super.onWindowFocusChanged(hasFocus);
+        if (hasFocus && root != null) {
+            applySystemBars();
         }
     }
 
@@ -527,11 +591,13 @@ public class MainActivity extends SDLActivity {
         settingsOpen = true;
         paksOpen = false;
         panel.refresh();
+        applyUiSettings();
         layoutAll();
     }
 
     void closeSettings() {
         settingsOpen = false;
+        applyUiSettings();
         layoutAll();
     }
 
@@ -539,12 +605,168 @@ public class MainActivity extends SDLActivity {
         paksOpen = true;
         settingsOpen = false;
         paksPanel.refresh();
+        applyUiSettings();
         layoutAll();
     }
 
     void closePaks() {
         paksOpen = false;
+        applyUiSettings();
         layoutAll();
+    }
+
+    /* ---------------------------------------------------------------- */
+    /* Menus, full screen, theme, the app folder */
+
+    private void showResetMenu() {
+        List<PopupList.Item> items = new ArrayList<>();
+        items.add(new PopupList.Item(R.drawable.ic_reset, "Soft reset (like the RESET button)",
+                () -> command(OP_SOFT_RESET, 0, 0, null)));
+        items.add(new PopupList.Item(R.drawable.ic_power, "Hard reset (power off and on)",
+                () -> command(OP_HARD_RESET, 0, 0, null)));
+        PopupList.show(this, resetButton, items);
+    }
+
+    /* The hamburger menu. */
+    private void showMenu() {
+        List<PopupList.Item> items = new ArrayList<>();
+        items.add(new PopupList.Item(R.drawable.ic_settings, "Settings", this::openSettings));
+        items.add(new PopupList.Item(R.drawable.ic_fullscreen, "Full screen", () -> setFullscreen(true)));
+        items.add(new PopupList.Item(R.drawable.ic_folder, "Open the app folder", this::openHomeFolder));
+        items.add(new PopupList.Item(R.drawable.ic_contrast, Theme.dark ? "Switch to light theme" : "Switch to dark theme",
+                () -> setThemePref(Theme.dark ? "light" : "dark")));
+        items.add(new PopupList.Item(R.drawable.ic_info, "About", this::showAbout));
+        PopupList.show(this, menuButton, items);
+    }
+
+    void setFullscreen(boolean on) {
+        fullscreen = on;
+        if (on) {
+            settingsOpen = false;
+            paksOpen = false;
+            Toast.makeText(this, settings.getBool("ui_pad", false)
+                    ? "Full screen. Back or the corner button exits."
+                    : "Full screen. Turn on Pad first to get a joystick. Back exits.", Toast.LENGTH_SHORT).show();
+        }
+        applySystemBars();
+        applyUiSettings();
+        layoutAll();
+    }
+
+    /* "dark", "light" or "system". */
+    void setThemePref(String pref) {
+        settings.set("ui_theme", pref);
+        // not inside the drop-down's own callback: that rebuilds the panel it came from
+        handler.post(this::applyTheme);
+    }
+
+    private void applyTheme() {
+        Theme.setDark(Theme.resolveDark(settings.get("ui_theme", "dark"), this));
+        root.setBackgroundColor(Theme.STAGE);
+        toolbar.setBackgroundColor(Theme.SURFACE);
+        exitFullscreen.setImageDrawable(Theme.icon(this, R.drawable.ic_fullscreen_exit, Theme.TEXT_STRONG, Theme.ICON_DP));
+        exitFullscreen.setBackground(Theme.box(this, Theme.SCRIM, 0, 0));
+        for (ToolButton b : new ToolButton[] { keysButton, padButton, typeButton, resetButton, paksButton, menuButton,
+                tabKeys, tabJoy }) {
+            b.refreshTheme();
+        }
+        // the two sheets build their widgets from the palette, so make new ones
+        int tab = panel.currentTab();
+        root.removeView(panel);
+        panel = new SettingsPanel(this, tab);
+        panel.setVisibility(View.GONE);
+        root.addView(panel, new FrameLayout.LayoutParams(0, 0));
+        root.removeView(paksPanel);
+        paksPanel = new PaksPanel(this, pakLibraryRef[0]);
+        paksPanel.setVisibility(View.GONE);
+        root.addView(paksPanel, new FrameLayout.LayoutParams(0, 0));
+        exitFullscreen.bringToFront();
+        if (settingsOpen) {
+            panel.refresh();
+        } else if (paksOpen) {
+            paksPanel.refresh();
+        }
+        applySystemBars();
+        applyUiSettings();
+        layoutAll();
+    }
+
+    /* Status and navigation bars: the stage's color, dark icons on a light stage,
+     * and hidden (swipe to peek) in full screen. */
+    @SuppressWarnings("deprecation")
+    private void applySystemBars() {
+        getWindow().setStatusBarColor(Theme.STAGE);
+        getWindow().setNavigationBarColor(Theme.STAGE);
+        View decor = getWindow().getDecorView();
+        int f = decor.getSystemUiVisibility();
+        int hide = View.SYSTEM_UI_FLAG_FULLSCREEN | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY | View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION;
+        int light = View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR | View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR;
+        f = fullscreen ? (f | hide) : (f & ~hide);
+        f = Theme.dark ? (f & ~light) : (f | light);
+        decor.setSystemUiVisibility(f);
+    }
+
+    /* Show the app's folder (ROMs, disks, settings) in the phone's file manager.
+     * It lives in Android/media/<package>/, which the system file manager can open;
+     * if nothing will open that folder directly, the folder picker starts there. */
+    void openHomeFolder() {
+        File dir = homeDir();
+        String path = dir.getAbsolutePath();
+        String docId = null;
+        String[] prefixes = { "/storage/emulated/0/", "/sdcard/" };
+        for (String pre : prefixes) {
+            if (path.startsWith(pre)) {
+                docId = "primary:" + path.substring(pre.length());
+            }
+        }
+        if (docId == null && path.startsWith("/storage/")) {
+            int slash = path.indexOf('/', "/storage/".length());
+            if (slash > 0) {
+                docId = path.substring("/storage/".length(), slash) + ":" + path.substring(slash + 1);
+            }
+        }
+        if (docId != null) {
+            Uri uri = DocumentsContract.buildDocumentUri("com.android.externalstorage.documents", docId);
+            try {
+                Intent view = new Intent(Intent.ACTION_VIEW);
+                view.setDataAndType(uri, DocumentsContract.Document.MIME_TYPE_DIR);
+                view.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                startActivity(view);
+                return;
+            } catch (ActivityNotFoundException | SecurityException e) {
+                Log.i(TAG, "no file manager takes the folder directly: " + e);
+            }
+            try {
+                Intent tree = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
+                tree.putExtra(DocumentsContract.EXTRA_INITIAL_URI, uri);
+                startActivity(tree);
+                Toast.makeText(this, "Your files are in " + path, Toast.LENGTH_LONG).show();
+                return;
+            } catch (ActivityNotFoundException | SecurityException e) {
+                Log.i(TAG, "no folder picker: " + e);
+            }
+        }
+        Toast.makeText(this, "No file manager found. The folder is " + path, Toast.LENGTH_LONG).show();
+    }
+
+    private void showAbout() {
+        String version = "";
+        try {
+            version = getPackageManager().getPackageInfo(getPackageName(), 0).versionName;
+        } catch (Exception ignored) {
+        }
+        Theme.dialog(this)
+                .setTitle("XRoar for Android")
+                .setMessage("Version " + version
+                        + "\n\nXRoar, the Dragon and Tandy Color Computer emulator, by Ciaran Anscomb (GPL)."
+                        + "\nSDL2 (zlib)."
+                        + "\nFonts: Archivo and Archivo Black (SIL Open Font License)."
+                        + "\nInterface after the BUIK Basic UI Kit."
+                        + "\n\nYour files: " + homeDir().getPath())
+                .setPositiveButton("OK", null)
+                .show();
     }
 
     /* ---------------------------------------------------------------- */
@@ -637,7 +859,7 @@ public class MainActivity extends SDLActivity {
         final RomManager.Identity id = RomManager.identify(data);
         final RomCatalog.Entry e = id.entry;
         if (e != null && (e.kind.equals("PAK") || e.kind.equals("GMC"))) {
-            new AlertDialog.Builder(this)
+            Theme.dialog(this)
                     .setTitle("That's a cartridge")
                     .setMessage(name + " is " + e.desc + ", a Program Pak, not a system ROM.\n\nAdd it to your Paks instead?")
                     .setPositiveButton("Add to Paks", (d, w) -> {
@@ -656,7 +878,7 @@ public class MainActivity extends SDLActivity {
                 Toast.makeText(this, name + " is " + e.desc + " and can't be used here", Toast.LENGTH_LONG).show();
                 return;
             }
-            new AlertDialog.Builder(this)
+            Theme.dialog(this)
                     .setTitle("Wrong ROM?")
                     .setMessage(name + " is " + e.desc + ".\n\nThat's the " + right.title
                             + " ROM, not " + slot.title + ". Install it as " + right.title + " instead?")
@@ -668,7 +890,7 @@ public class MainActivity extends SDLActivity {
         } else if (e == null && slot != RomManager.Slot.SDC && slot != RomManager.Slot.EMES) {
             String size = data.length == 8192 || data.length == 16384 ? "" :
                     "\n\nIts size (" + data.length + " bytes) isn't what a CoCo ROM is (8192 or 16384), so it may be damaged.";
-            new AlertDialog.Builder(this)
+            Theme.dialog(this)
                     .setTitle("Unrecognized ROM")
                     .setMessage(name + " isn't one of the ROMs XRoar knows (CRC " + String.format("%08x", id.crc)
                             + ")." + size + "\n\nInstall it as " + slot.title + " anyway?")
@@ -707,7 +929,7 @@ public class MainActivity extends SDLActivity {
         if (what == null) {
             return;
         }
-        new AlertDialog.Builder(this)
+        Theme.dialog(this)
                 .setTitle("Remove " + slot.title + "?")
                 .setMessage(what + "\n\nThe file is deleted from the roms folder."
                         + (slot.required ? "\nThe CoCo can't start without it until you add another." : ""))
@@ -748,15 +970,31 @@ public class MainActivity extends SDLActivity {
     void setUiString(String key, String value) {
         settings.set(key, value);
         applyUiSettings();
+        layoutAll();
     }
 
     void setUi(String key, boolean on) {
         settings.setBool(key, on);
         applyUiSettings();
+        layoutAll();
+    }
+
+    void setUiInt(String key, int value) {
+        settings.setInt(key, value);
+        applyUiSettings();
+    }
+
+    /* While the opacity slider is dragged: show it, save it when it is let go. */
+    void previewVpadAlpha(int percent) {
+        pad.setOpacity(percent);
     }
 
     @Override
     public void onBackPressed() {
+        if (fullscreen) {
+            setFullscreen(false);
+            return;
+        }
         if (settingsOpen) {
             closeSettings();
             return;
@@ -816,7 +1054,7 @@ public class MainActivity extends SDLActivity {
         android.widget.ScrollView sv = new android.widget.ScrollView(this);
         sv.addView(box);
 
-        final AlertDialog d = new AlertDialog.Builder(this)
+        final AlertDialog d = Theme.dialog(this)
                 .setTitle("Type text")
                 .setView(sv)
                 .setPositiveButton("Type", (dlg, which) -> {
@@ -850,7 +1088,7 @@ public class MainActivity extends SDLActivity {
                 msg = BasicText.summary(probs, 4);
             }
             info.setText(msg);
-            info.setTextColor(errors ? Theme.ERROR : (probs.isEmpty() ? Theme.TERTIARY_CONTAINER : Theme.SECONDARY));
+            info.setTextColor(errors ? Theme.ERROR : (probs.isEmpty() ? Theme.GOOD : Theme.SECONDARY));
             android.widget.Button ok = d.getButton(AlertDialog.BUTTON_POSITIVE);
             if (ok != null) {
                 ok.setEnabled(!text.isEmpty() && (!errors || skip.isChecked()));

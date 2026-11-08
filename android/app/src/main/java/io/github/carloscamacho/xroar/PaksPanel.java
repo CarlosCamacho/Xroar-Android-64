@@ -21,10 +21,11 @@ import java.util.List;
  * to insert it (the CoCo resets and starts it, as turning it on with the Pak
  * in would), long-press to delete it. */
 final class PaksPanel extends LinearLayout {
-    private static final int BG = Theme.SURFACE;
-    private static final int TEXT = Theme.TEXT_STRONG;
-    private static final int DIM = Theme.TEXT_MUTED;
-    private static final int WARN = Theme.ERROR;
+    // read when the panel is built; a new panel is built when the theme changes
+    private final int BG = Theme.SURFACE;
+    private final int TEXT = Theme.TEXT_STRONG;
+    private final int DIM = Theme.TEXT_MUTED;
+    private final int WARN = Theme.ERROR;
 
     private final MainActivity host;
     private final PakLibrary library;
@@ -48,16 +49,16 @@ final class PaksPanel extends LinearLayout {
         header.setPadding(dp(Theme.SPACE_S), dp(Theme.SPACE_XS), dp(Theme.SPACE_XS), dp(Theme.SPACE_XS));
         TextView title = Theme.heading(host, "Paks", Theme.H4);
         header.addView(title, new LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-        Button eject = Theme.textButton(host, "Eject");
+        Button eject = Theme.withIcon(Theme.textButton(host, "Eject"), R.drawable.ic_eject);
         eject.setOnClickListener(v -> {
             host.ejectPak();
             updateStatus();
         });
         header.addView(eject);
-        Button add = Theme.textButton(host, "Add…");
+        Button add = Theme.withIcon(Theme.textButton(host, "Add…"), R.drawable.ic_add);
         add.setOnClickListener(v -> host.pickPaks());
         header.addView(add);
-        Button close = Theme.textButton(host, "Close");
+        Button close = Theme.withIcon(Theme.textButton(host, "Close"), R.drawable.ic_close);
         close.setOnClickListener(v -> host.closePaks());
         header.addView(close);
         addView(header, new LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
@@ -111,7 +112,7 @@ final class PaksPanel extends LinearLayout {
     private void updateStatus() {
         String slot = host.currentPakName();
         status.setText(slot == null ? "No Pak in the slot." : "In the slot: " + slot);
-        status.setTextColor(slot == null ? DIM : Theme.BRAND_GREEN);
+        status.setTextColor(slot == null ? DIM : Theme.GOOD);
         countView.setText(all.size() + " in " + library.dir().getPath()
                 + (all.isEmpty() ? "\nTap Add… or copy .rom / .ccc files there." : ""));
     }
@@ -122,18 +123,24 @@ final class PaksPanel extends LinearLayout {
             @Override
             public View getView(int position, View convert, ViewGroup parent) {
                 LinearLayout row = new LinearLayout(getContext());
-                row.setOrientation(VERTICAL);
+                row.setOrientation(HORIZONTAL);
                 row.setGravity(Gravity.CENTER_VERTICAL);
                 row.setMinimumHeight(dp(Theme.CONTROL_HEIGHT_DP));
                 row.setPadding(dp(Theme.SPACE_S), dp(Theme.SPACE_XS), dp(Theme.SPACE_S), dp(Theme.SPACE_XS));
                 row.setBackground(Theme.listRow(getContext()));
                 PakLibrary.Pak p = getItem(position);
+                row.addView(Theme.iconView(getContext(), p.needsCoco3 ? R.drawable.ic_warning : R.drawable.ic_cartridge,
+                        p.needsCoco3 ? WARN : DIM, Theme.ICON_DP), new LayoutParams(dp(Theme.ICON_DP), dp(Theme.ICON_DP)));
+                LinearLayout text = new LinearLayout(getContext());
+                text.setOrientation(VERTICAL);
+                text.setPadding(dp(Theme.SPACE_S), 0, 0, 0);
                 TextView t = Theme.body(getContext(), p.title, Theme.P3, p.needsCoco3 ? DIM : TEXT);
                 t.setLineSpacing(0, Theme.HEADING_LINE);
-                row.addView(t);
+                text.addView(t);
                 TextView d = Theme.body(getContext(), p.detail, Theme.P5, p.needsCoco3 ? WARN : DIM);
                 d.setLineSpacing(0, Theme.HEADING_LINE);
-                row.addView(d);
+                text.addView(d);
+                row.addView(text, new LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
                 return row;
             }
         });
@@ -141,7 +148,7 @@ final class PaksPanel extends LinearLayout {
 
     private void insert(PakLibrary.Pak p) {
         if (p.needsCoco3) {
-            new AlertDialog.Builder(getContext())
+            Theme.dialog(getContext())
                     .setTitle(p.title)
                     .setMessage("This is a CoCo 3 program. This app emulates a CoCo 1/2, so it will not run.\n\nInsert it anyway?")
                     .setPositiveButton("Insert anyway", (d, w) -> host.runPak(p.file.getPath(), p.title))
@@ -154,7 +161,7 @@ final class PaksPanel extends LinearLayout {
     }
 
     private void confirmDelete(PakLibrary.Pak p) {
-        new AlertDialog.Builder(getContext())
+        Theme.dialog(getContext())
                 .setTitle("Delete this Pak?")
                 .setMessage(p.title + "\n" + p.file.getName() + "\n\nThe file is removed from paks/.")
                 .setPositiveButton("Delete", (d, w) -> {
