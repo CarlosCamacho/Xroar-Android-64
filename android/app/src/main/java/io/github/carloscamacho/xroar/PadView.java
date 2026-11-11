@@ -39,6 +39,14 @@ final class PadView extends View {
         "Virtual (see-through, over the picture)" };
     static final String[] SIDE_IDS = { "left", "center", "right" };
     static final String[] SIDE_NAMES = { "Left", "Center", "Right" };
+    static final String[] VSIDE_IDS = { "left", "right" };
+    static final String[] VSIDE_NAMES = { "Left (buttons on the right)", "Right (buttons on the left)" };
+    // how the virtual stick moves
+    static final String[] MOTION_IDS = { "center", "free", "float" };
+    static final String[] MOTION_NAMES = {
+        "Center: springs back when you lift your finger",
+        "Free: stays where you leave it",
+        "Floating: the ring appears where you touch" };
 
     // what a finger that is down is doing
     private static final int R_STICK = 1, R_FIRE1 = 2, R_FIRE2 = 3, R_TIP = 4;
@@ -47,6 +55,8 @@ final class PadView extends View {
     private boolean haptic = true;
     private String type = "std";
     private String side = "center";
+    private String vside = "left";      // the virtual joystick's own side, and how it moves
+    private String vmotion = "center";
     private int opacity = 45;           // percent, for the virtual joystick
     private final boolean[] state = new boolean[6];
     private final SparseIntArray roles = new SparseIntArray();   // pointer id -> what it is doing
@@ -54,6 +64,7 @@ final class PadView extends View {
     private int vw, vh;
     private JoystickArt.Geo geo;
     private Bitmap staticBmp;           // the case and everything on it that doesn't move
+    private float homeX, homeY;         // where the virtual ring rests (a floating one moves)
     private float stickX, stickY;       // stick position, -1..1 each way
     private boolean fire1, fire2;
 
@@ -88,6 +99,25 @@ final class PadView extends View {
         invalidate();
     }
 
+    void setVirtualSide(String s) {
+        if (s == null || s.equals(vside)) {
+            return;
+        }
+        vside = s;
+        layout();
+        invalidate();
+    }
+
+    void setVirtualMotion(String m) {
+        if (m == null || m.equals(vmotion)) {
+            return;
+        }
+        releaseAll();
+        vmotion = m;
+        layout();
+        invalidate();
+    }
+
     /* How solid the virtual joystick is, 10-90 percent. */
     void setOpacity(int percent) {
         opacity = Math.max(10, Math.min(90, percent));
@@ -114,7 +144,9 @@ final class PadView extends View {
         if (vw <= 0 || vh <= 0) {
             return;
         }
-        geo = JoystickArt.layout(type, vw, vh, side);
+        geo = JoystickArt.layout(type, vw, vh, type.equals("virtual") ? vside : side);
+        homeX = geo.sx;
+        homeY = geo.sy;
         staticBmp = null;
     }
 
@@ -127,7 +159,9 @@ final class PadView extends View {
             return;
         }
         if (geo.virtual) {
-            JoystickArt.drawVirtual(c, geo, stickX, stickY, fire1, fire2, opacity * 255 / 100);
+            int a = opacity * 255 / 100;
+            // a floating ring that nobody is holding is only a hint of where to touch
+            JoystickArt.drawVirtual(c, geo, stickX, stickY, fire1, fire2, a, floating() && !stickHeld() ? a * 55 / 100 : a);
             return;
         }
         if (staticBmp == null || staticBmp.getWidth() != vw || staticBmp.getHeight() != vh) {
@@ -146,7 +180,19 @@ final class PadView extends View {
         return (float) Math.sqrt(dx * dx + dy * dy);
     }
 
+    private boolean floating() {
+        return geo != null && geo.virtual && "float".equals(vmotion);
+    }
+
+    /* A floating ring starts wherever a finger comes down on the stick's half of the picture. */
+    private boolean inFloatZone(float x) {
+        return "right".equals(vside) ? x >= vw / 2f : x < vw / 2f;
+    }
+
     private boolean onStick(float x, float y) {
+        if (floating()) {
+            return inFloatZone(x);
+        }
         float reach = geo.virtual ? geo.vR * 1.45f : geo.R * 1.6f;
         return dist(x, y, geo.sx, geo.sy) <= reach;
     }
@@ -215,6 +261,11 @@ final class PadView extends View {
                 break;
             }
             roles.put(e.getPointerId(idx), role);
+            if (role == R_STICK && floating()) {
+                // the ring opens under the finger (kept inside the picture)
+                geo.sx = Math.max(geo.vR, Math.min(vw - geo.vR, e.getX(idx)));
+                geo.sy = Math.max(geo.vR, Math.min(vh - geo.vR, e.getY(idx)));
+            }
             break;
         }
         case MotionEvent.ACTION_MOVE:
@@ -269,8 +320,17 @@ final class PadView extends View {
                 break;
             }
         }
-        stickX = held ? nx : 0;      // no finger on the stick: back to the centre
-        stickY = held ? ny : 0;
+        if (held) {
+            stickX = nx;
+            stickY = ny;
+        } else if (!(geo.virtual && "free".equals(vmotion))) {
+            stickX = 0;              // no finger on the stick: back to the centre...
+            stickY = 0;              // ...unless it is the virtual one set to stay where it is left
+        }
+        if (!held && floating()) {
+            geo.sx = homeX;
+            geo.sy = homeY;
+        }
         fire1 = f1;
         fire2 = f2;
         publish();

@@ -10,6 +10,8 @@
 # autoconf, automake, and Perl's Text::Iconv (XRoar's win2rc script uses it).
 #
 # Release signing: XROAR_KEYSTORE=/path/to/key.p12 XROAR_KEYPASS=... ./build.sh
+# (XROAR_KEYALIAS names the key in it, default "xroar".)  An environment that can
+# only hold text can pass the keystore as XROAR_KEYSTORE_B64, its base64.
 # Without those, the APK is signed with the Android debug key.
 #
 # Everything is built under $WORK (default ./build), outside the source trees.
@@ -38,6 +40,14 @@ GRADLE=${GRADLE:-gradle}
 
 die() { echo "build.sh: $*" >&2; exit 1; }
 step() { echo; echo "==> $*"; }
+
+# A keystore given as text: write it out for gradle (mode 600, under $WORK, which is git-ignored).
+if [ -n "${XROAR_KEYSTORE_B64:-}" ] && [ -z "${XROAR_KEYSTORE:-}" ]; then
+	mkdir -p "$WORK"
+	(umask 077; printf '%s' "$XROAR_KEYSTORE_B64" | base64 -d > "$WORK/release-key.p12") \
+		|| die "XROAR_KEYSTORE_B64 is not valid base64"
+	export XROAR_KEYSTORE=$WORK/release-key.p12
+fi
 
 SDK=${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}
 [ -n "$SDK" ] || die "set ANDROID_HOME to the Android SDK"

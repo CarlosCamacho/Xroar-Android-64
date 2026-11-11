@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+### v15 (versionCode 15)
+
+- **Theme: the system's by default.** Settings > Look offers "Same as the system" (the
+  default), Dark and Light.
+- **Virtual joystick settings** (Settings > Input): its own side, left or right (the
+  buttons go on the other side), and how it moves:
+  Center (springs back when you lift your finger), Free (stays where you leave it, like
+  the real Radio Shack stick, until you push it back) or Floating (the ring opens
+  under your finger anywhere on the stick's half of the picture; a faint ring marks
+  the spot when nobody is touching).
+- **One signing key for every build.** `build.sh` takes the keystore as text:
+  `XROAR_KEYSTORE_B64` (base64 of a PKCS#12 file) with `XROAR_KEYPASS`
+  (and `XROAR_KEYALIAS`, default `xroar`), next to the existing `XROAR_KEYSTORE`. Set those
+  as environment variables of the cloud environment and every session signs with the
+  same key, so updates install over the last one. The key is the one that signed v13 and
+  v14 (SHA-256 2F:6E:D1:2B...89:39), re-wrapped with a new password, so no reinstall.
+
 ### v14 (versionCode 14)
 
 - **Joysticks:** all of them are about 80% of the black area under the picture, and

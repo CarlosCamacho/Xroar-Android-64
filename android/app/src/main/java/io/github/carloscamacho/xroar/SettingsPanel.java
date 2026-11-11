@@ -512,8 +512,15 @@ final class SettingsPanel extends LinearLayout {
                 + "no case: it hovers see-through over the picture, so it works in full-screen mode too."));
         add(labeled("Joystick position", spinner(PadView.SIDE_NAMES, PadView.SIDE_IDS,
                 s.get("ui_joy_side", "center"), v -> host.setUiString("ui_joy_side", v))));
-        add(note("Where the joystick sits under the picture in portrait. The virtual joystick puts its stick on "
-                + "that side and the fire buttons on the other (Center acts as Left)."));
+        add(note("Where the joystick sits under the picture in portrait."));
+        add(labeled("Virtual joystick side", spinner(PadView.VSIDE_NAMES, PadView.VSIDE_IDS,
+                s.get("ui_vpad_side", "left"), v -> host.setUiString("ui_vpad_side", v))));
+        add(labeled("Virtual joystick motion", spinner(PadView.MOTION_NAMES, PadView.MOTION_IDS,
+                s.get("ui_vpad_mode", "center"), v -> host.setUiString("ui_vpad_mode", v))));
+        add(note("The virtual stick and its ring are on one side of the picture, the fire buttons on the other. "
+                + "Center: the stick returns to the middle when you lift your finger. Free: it stays where you "
+                + "leave it, like the real Radio Shack stick, until you push it back. Floating: touch anywhere on "
+                + "the stick's half and the ring opens under your finger."));
         add(slider("Virtual joystick opacity", 10, 90, s.getInt("ui_vpad_alpha", 45), 45, "%",
                 v -> host.previewVpadAlpha(v), v -> host.setUiInt("ui_vpad_alpha", v)));
         add(check("Show on-screen pad", s.getBool("ui_pad", false), b -> host.setPadVisible(b)));
@@ -612,9 +619,9 @@ final class SettingsPanel extends LinearLayout {
         final Settings s = host.settings();
         section("APPEARANCE");
         add(labeled("Theme", spinner(
-                new String[] { "Dark", "Light", "Same as the system" },
-                new String[] { "dark", "light", "system" },
-                s.get("ui_theme", "dark"), v -> host.setThemePref(v))));
+                new String[] { "Same as the system", "Dark", "Light" },
+                new String[] { "system", "dark", "light" },
+                s.get("ui_theme", "system"), v -> host.setThemePref(v))));
         add(note("The brand red and green stay the same. In the light theme red text is the brand red "
                 + "itself and good-news text a darker green, so both stay readable on white."));
         section("TOOLBAR");

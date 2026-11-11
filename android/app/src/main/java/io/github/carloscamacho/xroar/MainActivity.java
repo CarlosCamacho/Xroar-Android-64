@@ -162,7 +162,7 @@ public class MainActivity extends SDLActivity {
             Log.e(TAG, "can't set XROAR_HOME", e);
         }
         settings = new Settings(homeDir());
-        Theme.setDark(Theme.resolveDark(settings.get("ui_theme", "dark"), this));
+        Theme.setDark(Theme.resolveDark(settings.get("ui_theme", "system"), this));
         pakLibraryRef[0] = new PakLibrary(homeDir());
         pakLibraryRef[0].dir().mkdirs();
         roms = new RomManager(homeDir());
@@ -387,6 +387,8 @@ public class MainActivity extends SDLActivity {
         // In full screen only the see-through joystick makes sense, whichever one is chosen.
         pad.setType(fullscreen ? "virtual" : settings.get("ui_joy_type", "std"));
         pad.setSide(settings.get("ui_joy_side", "center"));
+        pad.setVirtualSide(settings.get("ui_vpad_side", "left"));
+        pad.setVirtualMotion(settings.get("ui_vpad_mode", "center"));
         pad.setOpacity(settings.getInt("ui_vpad_alpha", 45));
         pad.setHaptic(haptic);
         boolean joyTab = "joy".equals(settings.get("ui_tab", "keys"));
@@ -571,7 +573,7 @@ public class MainActivity extends SDLActivity {
     public void onConfigurationChanged(Configuration newConfig) {
         super.onConfigurationChanged(newConfig);
         if (root != null) {
-            if ("system".equals(settings.get("ui_theme", "dark"))
+            if ("system".equals(settings.get("ui_theme", "system"))
                     && Theme.resolveDark("system", this) != Theme.dark) {
                 applyTheme();
             }
@@ -661,7 +663,7 @@ public class MainActivity extends SDLActivity {
     }
 
     private void applyTheme() {
-        Theme.setDark(Theme.resolveDark(settings.get("ui_theme", "dark"), this));
+        Theme.setDark(Theme.resolveDark(settings.get("ui_theme", "system"), this));
         root.setBackgroundColor(Theme.STAGE);
         toolbar.setBackgroundColor(Theme.SURFACE);
         exitFullscreen.setImageDrawable(Theme.icon(this, R.drawable.ic_fullscreen_exit, Theme.TEXT_STRONG, Theme.ICON_DP));

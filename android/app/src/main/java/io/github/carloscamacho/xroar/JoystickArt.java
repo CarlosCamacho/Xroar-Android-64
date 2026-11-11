@@ -133,8 +133,10 @@ final class JoystickArt {
     /* The transparent overlay: a ring with a knob, and two round buttons, all
      * see-through at `a` (0-255) so the picture shows behind them.  Dark edges
      * under the light ones keep them readable on a white screen. */
-    static void drawVirtual(Canvas c, Geo g, float stickX, float stickY, boolean f1, boolean f2, int a) {
+    static void drawVirtual(Canvas c, Geo g, float stickX, float stickY, boolean f1, boolean f2, int a, int ringA) {
         float Rb = g.vR;
+        int full = a;
+        a = ringA;          // the ring, arrows and knob; the buttons below use `full`
         P.setShader(null);
         P.setMaskFilter(null);
         P.setStyle(Paint.Style.FILL);
@@ -173,8 +175,8 @@ final class JoystickArt {
         P.setColor(alpha(0x000000, a * 0.5f));
         c.drawCircle(kx, ky, kr, P);
 
-        virtualButton(c, g.f1x, g.f1y, g.f1r, f1, 0xC8102E, 0xFF3A55, "1", a);
-        virtualButton(c, g.f2x, g.f2y, g.f2r, f2, 0xF2F2F2, 0xFFFFFF, "2", a);
+        virtualButton(c, g.f1x, g.f1y, g.f1r, f1, 0xC8102E, 0xFF3A55, "1", full);
+        virtualButton(c, g.f2x, g.f2y, g.f2r, f2, 0xF2F2F2, 0xFFFFFF, "2", full);
         P.setStyle(Paint.Style.FILL);
     }
 

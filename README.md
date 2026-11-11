@@ -138,6 +138,7 @@ export ANDROID_HOME=/path/to/android-sdk     # with ndk;27.3.13750724, build-too
 ./build.sh                                   # -> build/out/xroar-android.apk
 ABIS=arm64-v8a ./build.sh                    # one ABI, faster
 XROAR_KEYSTORE=key.p12 XROAR_KEYPASS=... ./build.sh   # sign with your own key
+XROAR_KEYSTORE_B64=$(base64 -w0 key.p12) XROAR_KEYPASS=... ./build.sh   # the same, key passed as text
 ```
 
 The build host needs JDK 17+, Gradle 8.9+ (`GRADLE=` to point at one), git,
