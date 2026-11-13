@@ -1,7 +1,12 @@
 # Current Baton Pass
-- **Current State:** `main` (85d7335) is v13, the BUIK restyle with bundled Archivo fonts, and builds cleanly. Branch `claude/dazzling-brahmagupta-oukj0i` is 3 commits ahead (v14 big self-centering joysticks, virtual joystick, full screen, light/dark theme, icons, hamburger menu; v15 system theme default, virtual joystick side and motion, keystore as text). v15 builds cleanly (`build.sh`, `apksigner` verify) but v14 and v15 are not merged and have not been run on a phone.
+- **Current State:** `main` is v13 (BUIK restyle, bundled Archivo fonts) and builds cleanly. Branch `claude/dazzling-brahmagupta-oukj0i` is ahead with v14 (self-centering 80% joysticks, virtual joystick, full screen, light/dark theme, icons, hamburger menu) and v15 (system theme default, virtual joystick side and motion, keystore as text). v15 builds cleanly (`build.sh`, `apksigner` OK) but v14/v15 are unmerged and have never run on a phone. Open work is GitHub Issues #2-#9.
 - **Immediate Next Step:**
-  - Open a PR for `claude/dazzling-brahmagupta-oukj0i` into `main` once the owner has tried the v15 APK on a phone (virtual joystick motion, Folder opening the file manager, light theme are untested).
-  - Add `XROAR_KEYPASS` and `XROAR_KEYSTORE_B64` (from the key file given to the owner) to the cloud environment so every build is signed with one key; until then a build in a fresh container will not install over an earlier APK.
-- **Dead Ends / Do Not Repeat:** None recorded yet.
+  - Do **#2** first: have the owner try the v15 APK, fix what fails in `PadView.java`/`JoystickArt.java`, get the owner's pick of virtual-joystick motion (Center/Free/Floating), then PR the branch into `main`.
+  - Next in order: #3 (theme, full screen, Folder on a phone), #4 (signing-key warning in `build.sh`), then #5-#9. The owner still has to add `XROAR_KEYPASS` and `XROAR_KEYSTORE_B64` to the cloud environment variables.
+- **Dead Ends / Do Not Repeat:**
+  - `gh issue list/create` fails here (GraphQL 403, `GH_TOKEN` invalid): use the GitHub MCP tools.
+  - The Figma connector would not connect (needs OAuth; proxy 403): read Figma over REST with the `api.figma.com` network secret; `/variables/local` is 403.
+  - Cloud network secrets cannot hold a keystore: use environment variables.
+  - A fresh container makes a new debug key, so its APK will not install over an older one.
+  - Do not bring back a non-centering stick as the default: the owner wants every stick to spring back on release.
 - **Verification:** Run `ANDROID_HOME=/path/to/android-sdk ./build.sh` and confirm zero errors before committing.
